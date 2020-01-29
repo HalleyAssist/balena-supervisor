@@ -1,10 +1,13 @@
+import * as Bluebird from 'bluebird';
 import * as _ from 'lodash';
 import { child_process, fs } from 'mz';
+import * as path from 'path';
 
 import * as constants from '../lib/constants';
 import { writeFileAtomic } from '../lib/fs-utils';
 
 import log from '../lib/supervisor-console';
+import Logger from '../logger';
 
 export interface ConfigOptions {
 	[key: string]: string | string[];
@@ -32,7 +35,13 @@ async function remountAndWriteAtomic(
 	await writeFileAtomic(file, data);
 }
 
+export interface BackendOptions {
+	logger?: Logger;
+}
+
 export abstract class DeviceConfigBackend {
+	protected options: BackendOptions = {};
+
 	// Does this config backend support the given device type?
 	public abstract matches(deviceType: string): boolean;
 
@@ -64,6 +73,12 @@ export abstract class DeviceConfigBackend {
 
 	// Return the env var name for this config option
 	public abstract createConfigVarName(configName: string): string;
+
+	// Allow a chosen config backend to be initialised
+	public initialise(opts: BackendOptions): Promise<DeviceConfigBackend> {
+		this.options = _.merge({}, this.options, opts);
+		return Promise.resolve(this);
+	}
 }
 
 export class RPiConfigBackend extends DeviceConfigBackend {
@@ -422,5 +437,259 @@ export class ExtlinuxConfigBackend extends DeviceConfigBackend {
 			});
 		});
 		return ret;
+	}
+}
+
+export type ConfigfsConfig = Dictionary<string[]>;
+
+/**
+ * A backend to handle ConfigFS host configuration for ACPI SSDT loading
+ *
+ * Supports:
+ * 	- {BALENA|RESIN}_HOST_CONFIGFS_ssdt = value | "value" | "value1","value2"
+ */
+export class ConfigfsConfigBackend extends DeviceConfigBackend {
+	private readonly SystemAmlFiles = path.join(
+		constants.rootMountPoint,
+		'/boot/acpi-tables',
+	);
+	private readonly ConfigFilePath = path.join(
+		constants.rootMountPoint,
+		'/mnt/boot/configfs.txt',
+	); // use constant for mount path, rename to ssdt.txt
+	private readonly ConfigfsMountPoint = path.join(
+		constants.rootMountPoint,
+		'/sys/kernel/config',
+	);
+	private readonly ConfigVarNamePrefix = `${constants.hostConfigVarPrefix}CONFIGFS_`;
+
+	// supported backend for the following device types...
+	public static readonly SupportedDeviceTypes = ['up-board'];
+
+	private stripPrefix(name: string): string {
+		return name.substr(this.ConfigVarNamePrefix.length);
+	}
+
+	private async listLoadedAcpiTables(): Promise<string[]> {
+		const acpiTablesDir = path.join(this.ConfigfsMountPoint, '/acpi/table');
+		return await fs.readdir(acpiTablesDir);
+	}
+
+	private async loadAML(aml: string): Promise<boolean> {
+		if (aml) {
+			const amlSrcPath = path.join(this.SystemAmlFiles, `${aml}.aml`);
+			// log to system log if the AML doesn't exist...
+			if (!(await fs.exists(amlSrcPath))) {
+				log.error(`Missing AML for \'${aml}\'. Unable to load.`);
+				if (this.options.logger) {
+					this.options.logger.logSystemMessage(
+						`Missing AML for \'${aml}\'. Unable to load.`,
+						{ aml, path: amlSrcPath },
+						'Load AML error',
+						false,
+					);
+				}
+				return false;
+			}
+
+			const amlDstPath = path.join(this.ConfigfsMountPoint, '/acpi/table', aml);
+			try {
+				const loadedTables = await this.listLoadedAcpiTables();
+
+				if (loadedTables.indexOf(aml) < 0) {
+					await fs.mkdir(amlDstPath);
+				}
+
+				log.info(`Loading AML ${aml}`);
+				await child_process.exec(
+					`cat ${amlSrcPath} > ${path.join(amlDstPath, 'aml')}`,
+				);
+
+				const [oemId, oemTableId, oemRevision] = await Bluebird.all([
+					fs.readFile(path.join(amlDstPath, 'oem_id'), 'utf8'),
+					fs.readFile(path.join(amlDstPath, 'oem_table_id'), 'utf8'),
+					fs.readFile(path.join(amlDstPath, 'oem_revision'), 'utf8'),
+				]);
+
+				log.info(
+					`AML: ${oemId.trim()} ${oemTableId.trim()} (Rev ${oemRevision.trim()})`,
+				);
+			} catch (e) {
+				log.error(e);
+			}
+			return true;
+		}
+		return false;
+	}
+
+	private async readConfigTxt(): Promise<ConfigfsConfig> {
+		// if we don't yet have a config file, just return an empty result...
+		if (!(await fs.exists(this.ConfigFilePath))) {
+			log.info('Empty ConfigFS config file');
+			return {};
+		}
+
+		// read the config file and split by newline...
+		const content = (await fs.readFile(this.ConfigFilePath, 'utf8')).split(
+			'\n',
+		);
+
+		// lines starting with # are comments, otherwise its split into (group 1) = (group 2)
+		const parseLineRegex = /^(?!\#)(.+?)\s*\=\s*(.+)/;
+
+		// parse each line of the config file, remove any bad entries, then return a ConfigfsConfig from them...
+		return content
+			.map(line => {
+				const result = {
+					name: '',
+					value: '',
+				};
+				const matches = line.match(parseLineRegex);
+				if (matches && matches.length >= 3) {
+					const [, name, value] = matches;
+					result.name = name;
+					result.value = value;
+				}
+				return result;
+			})
+			.filter(line => line.name !== '')
+			.reduce((config: ConfigfsConfig, { name, value }) => {
+				if (!config[name]) {
+					config[name] = [value];
+				} else {
+					config[name].push(value);
+				}
+				return config;
+			}, {});
+	}
+
+	private async writeConfigTxt(config: ConfigfsConfig): Promise<void> {
+		const lines: string[] = [];
+		Object.keys(config).forEach(key => {
+			config[key].forEach(v => {
+				lines.push(`${key} = ${v}`);
+			});
+		});
+
+		const content = lines.join('\r\n') + '\r\n';
+		await writeFileAtomic(this.ConfigFilePath, content);
+	}
+
+	private async loadConfiguredSsdt(config: ConfigfsConfig): Promise<void> {
+		if (config['ssdt'] !== undefined && _.isArray(config['ssdt'])) {
+			log.info('Loading configured SSDTs');
+			await Bluebird.mapSeries(config['ssdt'], aml => this.loadAML(aml));
+		}
+	}
+
+	public async initialise(
+		opts: BackendOptions,
+	): Promise<ConfigfsConfigBackend> {
+		try {
+			super.initialise(opts);
+
+			// load the acpi_configfs module...
+			await child_process.exec('modprobe acpi_configfs');
+
+			// read the existing config file...
+			const config = await this.readConfigTxt();
+
+			// write the config back out (reformatting it)
+			await this.writeConfigTxt(config);
+
+			// load the configured SSDT AMLs...
+			await this.loadConfiguredSsdt(config);
+			log.success('Initialised ConfigFS');
+		} catch (error) {
+			log.error(error);
+			if (this.options.logger) {
+				this.options.logger.logSystemMessage(
+					'Unable to initialise ConfigFS',
+					{ error },
+					'ConfigFS initialisation error',
+				);
+			}
+		}
+		return this;
+	}
+
+	public matches(deviceType: string): boolean {
+		return ConfigfsConfigBackend.SupportedDeviceTypes.includes(deviceType);
+	}
+
+	public async getBootConfig(): Promise<ConfigOptions> {
+		const options: ConfigOptions = {};
+
+		// read the config file...
+		const config = await this.readConfigTxt();
+
+		// see which SSDTs we have configured...
+		const ssdt = config['ssdt'];
+		if (_.isArray(ssdt) && ssdt.length > 0) {
+			// we have some...
+			options['ssdt'] = ssdt;
+		}
+		return options;
+	}
+
+	public async setBootConfig(opts: ConfigOptions): Promise<void> {
+		// read the config file...
+		const config = await this.readConfigTxt();
+
+		// see if the target state defined some SSDTs...
+		const ssdtKey = `${this.ConfigVarNamePrefix}ssdt`;
+		if (opts[ssdtKey]) {
+			// it did, so update the config with theses...
+			const ssdt = opts[ssdtKey];
+			const ssdts = _.isArray(ssdt) ? ssdt : [ssdt];
+			config['ssdt'] = ssdts;
+		} else {
+			// it did not, so remove any existing SSDTs from the config...
+			delete config['ssdt'];
+		}
+
+		// store the new config to disk...
+		this.writeConfigTxt(config);
+	}
+
+	public isSupportedConfig(name: string): boolean {
+		switch (this.stripPrefix(name)) {
+			case 'ssdt':
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	public isBootConfigVar(name: string): boolean {
+		switch (this.stripPrefix(name)) {
+			case 'ssdt':
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	public processConfigVarName(name: string): string {
+		return name;
+	}
+
+	public processConfigVarValue(name: string, value: string): string | string[] {
+		switch (this.stripPrefix(name)) {
+			case 'ssdt':
+				// value could be a single value, so just add to an array and return...
+				if (!_.startsWith(value, '"')) {
+					return [value];
+				} else {
+					// or, it could be parsable as the content of a JSON array; "value" | "value1","value2"
+					return JSON.parse(`[${value}]`) as string[];
+				}
+			default:
+				return value;
+		}
+	}
+
+	public createConfigVarName(name: string): string {
+		return `${this.ConfigVarNamePrefix}${name}`;
 	}
 }

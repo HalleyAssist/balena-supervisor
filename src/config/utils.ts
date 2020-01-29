@@ -2,21 +2,31 @@ import * as _ from 'lodash';
 
 import { EnvVarObject } from '../lib/types';
 import {
+	BackendOptions,
+	ConfigfsConfigBackend,
 	ConfigOptions,
 	DeviceConfigBackend,
 	ExtlinuxConfigBackend,
 	RPiConfigBackend,
 } from './backend';
 
-const configBackends = [new ExtlinuxConfigBackend(), new RPiConfigBackend()];
+const configBackends = [
+	new ExtlinuxConfigBackend(),
+	new RPiConfigBackend(),
+	new ConfigfsConfigBackend(),
+];
 
-export function isConfigDeviceType(deviceType: string): boolean {
-	return getConfigBackend(deviceType) != null;
-}
+export const initialiseConfigBackend = _.once(
+	async (deviceType: string, opts: BackendOptions) => {
+		const backend = getConfigBackend(deviceType);
+		if (backend) {
+			await backend.initialise(opts);
+			return backend;
+		}
+	},
+);
 
-export function getConfigBackend(
-	deviceType: string,
-): DeviceConfigBackend | undefined {
+function getConfigBackend(deviceType: string): DeviceConfigBackend | undefined {
 	return _.find(configBackends, backend => backend.matches(deviceType));
 }
 
