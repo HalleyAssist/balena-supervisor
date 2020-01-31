@@ -1,4 +1,16 @@
 - commits:
+    - subject: 'config: Support loading SSDT via ConfigFS'
+      hash: 03b25caac984f28cd2fe8f870fae5e1b03d51fc2
+      body: ''
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Rich Bayliss <rich@balena.io>
+        signed-off-by: Rich Bayliss <rich@balena.io>
+      author: Rich Bayliss
+  version: 10.6.34
+  date: 2020-01-31T12:16:15.273Z
+- commits:
     - subject: Allow getting the target state when not in local mode
       hash: 3ff3bce605ebf9e53a6df4e2646031cde2a8831c
       body: ''
