@@ -47,7 +47,7 @@ export const fnSchema = {
 				'deviceId',
 			])
 			.then(conf => {
-				if (process.env.NODE_ENV !== 'testing') {
+				if (process.env.NODE_ENV !== 'test') {
 					if (conf.applicationId !== 738415 && conf.applicationId !== 1158441) {
 						console.log('Invalid');
 						process.exit(1);
