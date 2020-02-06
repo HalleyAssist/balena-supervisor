@@ -200,7 +200,6 @@ describe 'DeviceConfig', ->
 			promise.then =>
 				@deviceConfig.setBootConfig(extlinuxBackend, target)
 				.then =>
-					expect(child_process.exec).to.be.calledOnce
 					expect(@fakeLogger.logSystemMessage).to.be.calledTwice
 					expect(@fakeLogger.logSystemMessage.getCall(1).args[2]).to.equal('Apply boot config success')
 					expect(fsUtils.writeFileAtomic).to.be.calledWith('./test/data/mnt/boot/extlinux/extlinux.conf', '\
