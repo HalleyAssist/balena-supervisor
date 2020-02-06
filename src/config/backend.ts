@@ -26,9 +26,6 @@ async function remountAndWriteAtomic(
 	data: string,
 ): Promise<void> {
 	// Here's the dangerous part:
-	await child_process.exec(
-		`mount -t vfat -o remount,rw ${constants.bootBlockDevice} ${bootMountPoint}`,
-	);
 	await writeFileAtomic(file, data);
 }
 
