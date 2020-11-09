@@ -6,6 +6,7 @@ import * as path from 'path';
 
 import * as conversions from '../lib/conversions';
 import { checkInt } from '../lib/validation';
+import { InternalInconsistencyError } from '../lib/errors';
 import { DockerPortOptions, PortMap } from './ports';
 import {
 	ConfigMap,
@@ -27,19 +28,37 @@ import { EnvVarObject } from '../lib/types';
 const SERVICE_NETWORK_MODE_REGEX = /service:\s*(.+)/;
 const CONTAINER_NETWORK_MODE_REGEX = /container:\s*(.+)/;
 
+export type ServiceStatus =
+	| 'Stopping'
+	| 'Stopped'
+	| 'Running'
+	| 'Installing'
+	| 'Installed'
+	| 'Dead'
+	| 'paused'
+	| 'restarting'
+	| 'removing'
+	| 'exited';
+
 export class Service {
-	public appId: number | null;
-	public imageId: number | null;
+	public appId: number;
+	public imageId: number;
 	public config: ServiceConfig;
 	public serviceName: string | null;
-	public releaseId: number | null;
-	public serviceId: number | null;
+	public releaseId: number;
+	public serviceId: number;
 	public imageName: string | null;
 	public containerId: string | null;
 
 	public dependsOn: string[] | null;
 
-	public status: string;
+	// This looks weird, and it is. The lowercase statuses come from Docker,
+	// except the dashboard takes these values and displays them on the dashboard.
+	// What we should be doin is defining these container statuses, and have the
+	// dashboard make these human readable instead. Until that happens we have
+	// this halfways state of some captalised statuses, and others coming directly
+	// from docker
+	public status: ServiceStatus;
 	public createdAt: Date | null;
 
 	private static configArrayFields: ServiceConfigArrayField[] = [
@@ -81,34 +100,35 @@ export class Service {
 
 	// The type here is actually ServiceComposeConfig, except that the
 	// keys must be camelCase'd first
-	public static fromComposeObject(
+	public static async fromComposeObject(
 		appConfig: ConfigMap,
 		options: DeviceMetadata,
-	): Service {
+	): Promise<Service> {
 		const service = new Service();
 
 		appConfig = ComposeUtils.camelCaseConfig(appConfig);
 
-		const intOrNull = (
-			val: string | number | null | undefined,
-		): number | null => {
-			return checkInt(val) || null;
-		};
+		if (!appConfig.appId) {
+			throw new InternalInconsistencyError('No app id for service');
+		}
+		const appId = checkInt(appConfig.appId);
+		if (appId == null) {
+			throw new InternalInconsistencyError('Malformed app id for service');
+		}
 
 		// Seperate the application information from the docker
 		// container configuration
-		service.imageId = intOrNull(appConfig.imageId);
+		service.imageId = parseInt(appConfig.imageId, 10);
 		delete appConfig.imageId;
 		service.serviceName = appConfig.serviceName;
 		delete appConfig.serviceName;
-		service.appId = intOrNull(appConfig.appId);
+		service.appId = appId;
 		delete appConfig.appId;
-		service.releaseId = intOrNull(appConfig.releaseId);
+		service.releaseId = parseInt(appConfig.releaseId, 10);
 		delete appConfig.releaseId;
-		service.serviceId = intOrNull(appConfig.serviceId);
+		service.serviceId = parseInt(appConfig.serviceId, 10);
 		delete appConfig.serviceId;
-		service.imageName = appConfig.imageName;
-		delete appConfig.imageName;
+		service.imageName = appConfig.image;
 		service.dependsOn = appConfig.dependsOn || null;
 		delete appConfig.dependsOn;
 		service.createdAt = appConfig.createdAt;
@@ -130,7 +150,7 @@ export class Service {
 		// First process the networks correctly
 		let networks: ServiceConfig['networks'] = {};
 		if (_.isArray(config.networks)) {
-			_.each(config.networks, name => {
+			_.each(config.networks, (name) => {
 				networks[name] = {};
 			});
 		} else if (_.isObject(config.networks)) {
@@ -139,7 +159,7 @@ export class Service {
 		// Prefix the network entries with the app id
 		networks = _.mapKeys(networks, (_v, k) => `${service.appId}_${k}`);
 		// Ensure that we add an alias of the service name
-		networks = _.mapValues(networks, v => {
+		networks = _.mapValues(networks, (v) => {
 			if (v.aliases == null) {
 				v.aliases = [];
 			}
@@ -283,7 +303,7 @@ export class Service {
 		config.volumes = Service.extendAndSanitiseVolumes(
 			config.volumes,
 			options.imageInfo,
-			service.appId || 0,
+			service.appId,
 			service.serviceName || '',
 		);
 
@@ -305,7 +325,7 @@ export class Service {
 		);
 		expose = expose.concat(_.keys(imageExposedPorts));
 		// Also add any exposed ports which are implied from the portMaps
-		const exposedFromPortMappings = _.flatMap(portMaps, port =>
+		const exposedFromPortMappings = _.flatMap(portMaps, (port) =>
 			port.toExposedPortArray(),
 		);
 		expose = expose.concat(exposedFromPortMappings);
@@ -326,11 +346,13 @@ export class Service {
 		}
 
 		if (_.isArray(config.sysctls)) {
-			config.sysctls = _.fromPairs(_.map(config.sysctls, v => _.split(v, '=')));
+			config.sysctls = _.fromPairs(
+				_.map(config.sysctls, (v) => _.split(v, '=')),
+			);
 		}
 		config.sysctls = _.mapValues(config.sysctls, String);
 
-		_.each(['cpuShares', 'cpuQuota', 'oomScoreAdj'], key => {
+		_.each(['cpuShares', 'cpuQuota', 'oomScoreAdj'], (key) => {
 			const numVal = checkInt(config[key]);
 			if (numVal) {
 				config[key] = numVal;
@@ -369,6 +391,7 @@ export class Service {
 			command: [],
 			cgroupParent: '',
 			devices,
+			deviceRequests: [],
 			dnsOpt: [],
 			entrypoint: '',
 			extraHosts: [],
@@ -410,10 +433,17 @@ export class Service {
 			user: '',
 			workingDir: '',
 			tty: true,
+			running: true,
 		});
 
+		// If we have the docker image ID, we replace the image
+		// with that
+		if (options.imageInfo?.Id != null) {
+			config.image = options.imageInfo.Id;
+		}
+
 		// Mutate service with extra features
-		ComposeUtils.addFeaturesFromLabels(service, options);
+		await ComposeUtils.addFeaturesFromLabels(service, options);
 
 		return service;
 	}
@@ -430,7 +460,9 @@ export class Service {
 		} else if (container.State.Status === 'dead') {
 			svc.status = 'Dead';
 		} else {
-			svc.status = container.State.Status;
+			// We know this cast as fine as we represent all of the status available
+			// by docker in the ServiceStatus type
+			svc.status = container.State.Status as ServiceStatus;
 		}
 
 		svc.createdAt = new Date(container.Created);
@@ -457,7 +489,7 @@ export class Service {
 
 		const portMaps = PortMap.fromDockerOpts(container.HostConfig.PortBindings);
 		let expose = _.flatMap(
-			_.flatMap(portMaps, p => p.toDockerOpts().exposedPorts),
+			_.flatMap(portMaps, (p) => p.toDockerOpts().exposedPorts),
 			_.keys,
 		);
 		if (container.Config.ExposedPorts != null) {
@@ -512,6 +544,7 @@ export class Service {
 			capAdd: container.HostConfig.CapAdd || [],
 			capDrop: container.HostConfig.CapDrop || [],
 			devices: container.HostConfig.Devices || [],
+			deviceRequests: container.HostConfig.DeviceRequests || [],
 			networks,
 			memLimit: container.HostConfig.Memory || 0,
 			memReservation: container.HostConfig.MemoryReservation || 0,
@@ -550,22 +583,44 @@ export class Service {
 			tty: container.Config.Tty || false,
 		};
 
-		svc.appId = checkInt(svc.config.labels['io.balena.app-id']) || null;
-		svc.serviceId = checkInt(svc.config.labels['io.balena.service-id']) || null;
+		const appId = checkInt(svc.config.labels['io.balena.app-id']);
+		if (appId == null) {
+			throw new InternalInconsistencyError(
+				`Found a service with no appId! ${svc}`,
+			);
+		}
+		svc.appId = appId;
 		svc.serviceName = svc.config.labels['io.balena.service-name'];
+		svc.serviceId = parseInt(svc.config.labels['io.balena.service-id'], 10);
+		if (Number.isNaN(svc.serviceId)) {
+			throw new InternalInconsistencyError(
+				'Attempt to build Service class from container with malformed labels',
+			);
+		}
 		const nameMatch = container.Name.match(/.*_(\d+)_(\d+)$/);
+		if (nameMatch == null) {
+			throw new InternalInconsistencyError(
+				'Attempt to build Service class from container with malformed name',
+			);
+		}
 
-		svc.imageId = nameMatch != null ? checkInt(nameMatch[1]) || null : null;
-		svc.releaseId = nameMatch != null ? checkInt(nameMatch[2]) || null : null;
+		svc.imageId = parseInt(nameMatch[1], 10);
+		svc.releaseId = parseInt(nameMatch[2], 10);
 		svc.containerId = container.Id;
 
 		return svc;
 	}
 
-	public toComposeObject(): ServiceConfig {
-		// This isn't techinically correct as we do some changes
-		// to the configuration which we cannot reverse. We also
-		// represent the ports as a class, which isn't ideal
+	/**
+	 * Here we try to reverse the fromComposeObject to the best of our ability, as
+	 * this is used for the supervisor reporting it's own target state. Some of
+	 * these values won't match in a 1-1 comparison, such as `devices`, as we lose
+	 * some data about.
+	 *
+	 * @returns ServiceConfig
+	 * @memberof Service
+	 */
+	public toComposeObject() {
 		return this.config;
 	}
 
@@ -577,7 +632,7 @@ export class Service {
 		const { exposedPorts, portBindings } = this.generateExposeAndPorts();
 
 		const tmpFs: Dictionary<''> = {};
-		_.each(this.config.tmpfs, tmp => {
+		_.each(this.config.tmpfs, (tmp) => {
 			tmpFs[tmp] = '';
 		});
 
@@ -632,6 +687,7 @@ export class Service {
 				Binds: binds,
 				CgroupParent: this.config.cgroupParent,
 				Devices: this.config.devices,
+				DeviceRequests: this.config.deviceRequests,
 				Dns: this.config.dns,
 				DnsOptions: this.config.dnsOpt,
 				DnsSearch: this.config.dnsSearch,
@@ -686,6 +742,15 @@ export class Service {
 			}
 			sameNetworks =
 				sameNetworks && this.isSameNetwork(this.config.networks[name], network);
+			if (!sameNetworks) {
+				const currentNetwork = this.config.networks[name];
+				const newNetwork = network;
+				log.debug(
+					`Networks do not match!\nCurrent network: \n${JSON.stringify(
+						currentNetwork,
+					)}\nNew network: \n${JSON.stringify(newNetwork)}`,
+				);
+			}
 		});
 
 		// Check the configuration for any changes
@@ -813,7 +878,7 @@ export class Service {
 			this.appId || 0,
 			this.serviceName || '',
 		);
-		const validVolumes = _.map(this.config.volumes, volume => {
+		const validVolumes = _.map(this.config.volumes, (volume) => {
 			if (_.includes(defaults, volume) || !_.includes(volume, ':')) {
 				return null;
 			}
@@ -854,7 +919,7 @@ export class Service {
 	} {
 		const binds: string[] = [];
 		const volumes: { [volName: string]: {} } = {};
-		_.each(this.config.volumes, volume => {
+		_.each(this.config.volumes, (volume) => {
 			if (_.includes(volume, ':')) {
 				binds.push(volume);
 			} else {
@@ -869,7 +934,7 @@ export class Service {
 		const exposed: DockerPortOptions['exposedPorts'] = {};
 		const ports: DockerPortOptions['portBindings'] = {};
 
-		_.each(this.config.portMaps, pmap => {
+		_.each(this.config.portMaps, (pmap) => {
 			const { exposedPorts, portBindings } = pmap.toDockerOpts();
 			_.merge(exposed, exposedPorts);
 			_.mergeWith(ports, portBindings, (destVal, srcVal) => {
@@ -883,7 +948,7 @@ export class Service {
 		// We also want to merge the compose and image exposedPorts
 		// into the list of exposedPorts
 		const composeExposed: DockerPortOptions['exposedPorts'] = {};
-		_.each(this.config.expose, port => {
+		_.each(this.config.expose, (port) => {
 			composeExposed[port] = {};
 		});
 		_.merge(exposed, composeExposed);
@@ -908,8 +973,8 @@ export class Service {
 						SERVICE_NAME: serviceName,
 						DEVICE_UUID: options.uuid,
 						DEVICE_TYPE: options.deviceType,
+						DEVICE_ARCH: options.deviceArch,
 						HOST_OS_VERSION: options.osVersion,
-						SUPERVISOR_VERSION: options.version,
 						APP_LOCK_PATH: '/tmp/balena/updates.lock',
 					},
 					(_val, key) => `${namespace}_${key}`,
@@ -946,9 +1011,9 @@ export class Service {
 				const [currentAliases, targetAliases] = [
 					current.aliases,
 					target.aliases,
-				].map(aliases =>
+				].map((aliases) =>
 					_.sortBy(
-						aliases.filter(a => !_.startsWith(this.containerId || '', a)),
+						aliases.filter((a) => !_.startsWith(this.containerId || '', a)),
 					),
 				);
 
@@ -1004,15 +1069,15 @@ export class Service {
 	): ServiceConfig['volumes'] {
 		let volumes: ServiceConfig['volumes'] = [];
 
-		_.each(composeVolumes, volume => {
+		_.each(composeVolumes, (volume) => {
 			const isBind = _.includes(volume, ':');
 			if (isBind) {
 				const [bindSource, bindDest, mode] = volume.split(':');
 				if (!path.isAbsolute(bindSource)) {
 					// namespace our volumes by appId
-					let volumeDef = `${appId}_${bindSource}:${bindDest}`;
+					let volumeDef = `${appId}_${bindSource.trim()}:${bindDest.trim()}`;
 					if (mode != null) {
-						volumeDef = `${volumeDef}:${mode}`;
+						volumeDef = `${volumeDef}:${mode.trim()}`;
 					}
 					volumes.push(volumeDef);
 				} else {

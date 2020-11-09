@@ -12,6 +12,7 @@ export interface CheckIntOptions {
 
 const ENV_VAR_KEY_REGEX = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const LABEL_NAME_REGEX = /^[a-zA-Z][a-zA-Z0-9\.\-]*$/;
+const NUMERALS_REGEX = /^-?[0-9]+\.?0*$/; // Allows trailing 0 decimals
 
 /**
  * checkInt
@@ -22,16 +23,15 @@ const LABEL_NAME_REGEX = /^[a-zA-Z][a-zA-Z0-9\.\-]*$/;
 export function checkInt(
 	s: unknown,
 	options: CheckIntOptions = {},
-): number | void {
-	if (s == null) {
+): number | undefined {
+	// Check for non-numeric characters
+	if (!NUMERALS_REGEX.test(s as string)) {
 		return;
 	}
 
-	// parseInt will happily take a number, but the typings won't accept it,
-	// simply cast it here
-	const i = parseInt(s as string, 10);
+	const i = Number(s);
 
-	if (isNaN(i)) {
+	if (!Number.isInteger(i)) {
 		return;
 	}
 
@@ -61,7 +61,7 @@ export function checkString(s: unknown): string | void {
  * Given a value which can be a string, boolean or number, return a boolean
  * which represents if the input was truthy
  */
-export function checkTruthy(v: unknown): boolean | void {
+export function checkTruthy(v: unknown): boolean | undefined {
 	if (_.isString(v)) {
 		v = v.toLowerCase();
 	}
@@ -479,7 +479,7 @@ export function isValidDependentDevicesObject(devices: any): boolean {
 
 				return _.every(
 					a as TargetState['dependent']['devices'][any]['apps'],
-					app => {
+					(app) => {
 						app = _.defaults(_.clone(app), {
 							config: undefined,
 							environment: undefined,

@@ -3,7 +3,28 @@ import { ServiceComposeConfig } from '../compose/types/service';
 import { ComposeVolumeConfig } from '../compose/volume';
 import { EnvVarObject, LabelObject } from '../lib/types';
 
-export interface DeviceApplicationState {
+import App from '../compose/app';
+
+export type DeviceReportFields = Partial<{
+	api_port: number;
+	api_secret: string | null;
+	ip_address: string;
+	os_version: string | null;
+	os_variant: string | null;
+	supervisor_version: string;
+	provisioning_progress: null | number;
+	provisioning_state: string;
+	status: string;
+	update_failed: boolean;
+	update_pending: boolean;
+	update_downloaded: boolean;
+	is_on__commit: string;
+	logs_channel: null;
+	mac_address: string | null;
+}>;
+
+// This is the state that is sent to the cloud
+export interface DeviceStatus {
 	local?: {
 		config?: Dictionary<string>;
 		apps?: {
@@ -17,7 +38,7 @@ export interface DeviceApplicationState {
 				};
 			};
 		};
-	};
+	} & DeviceReportFields;
 	// TODO: Type the dependent entry correctly
 	dependent?: any;
 	commit?: string;
@@ -40,8 +61,8 @@ export interface TargetState {
 						imageId: number;
 						serviceName: string;
 						image: string;
-						running: boolean;
-						environment: EnvVarObject;
+						running?: boolean;
+						environment: Dictionary<string>;
 					} & ServiceComposeConfig;
 				};
 				volumes: Dictionary<Partial<ComposeVolumeConfig>>;
@@ -52,14 +73,14 @@ export interface TargetState {
 	// TODO: Correctly type this once dependent devices are
 	// actually properly supported
 	dependent: {
-		apps: Dictionary<{
+		apps: Array<{
 			name?: string;
 			image?: string;
 			commit?: string;
 			config?: EnvVarObject;
 			environment?: EnvVarObject;
 		}>;
-		devices: Dictionary<{
+		devices: Array<{
 			name?: string;
 			apps?: Dictionary<{
 				config?: EnvVarObject;
@@ -72,17 +93,18 @@ export interface TargetState {
 export type LocalTargetState = TargetState['local'];
 export type TargetApplications = LocalTargetState['apps'];
 export type TargetApplication = LocalTargetState['apps'][0];
+export type TargetApplicationService = TargetApplication['services'][0];
 export type AppsJsonFormat = Omit<TargetState['local'], 'name'> & {
 	pinDevice?: boolean;
 };
 
-export type ApplicationDatabaseFormat = Array<{
-	appId: number;
-	commit: string;
-	name: string;
-	source: string;
-	releaseId: number;
-	services: string;
-	networks: string;
-	volumes: string;
-}>;
+export type InstancedAppState = { [appId: number]: App };
+
+export interface InstancedDeviceState {
+	local: {
+		name: string;
+		config: Dictionary<string>;
+		apps: InstancedAppState;
+	};
+	dependent: any;
+}

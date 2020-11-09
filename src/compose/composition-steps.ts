@@ -1,17 +1,19 @@
 import * as _ from 'lodash';
 
-import Config from '../config';
+import * as config from '../config';
 
-import ApplicationManager from '../application-manager';
-import Images, { Image } from './images';
+import * as applicationManager from './application-manager';
+import type { Image } from './images';
+import * as images from './images';
 import Network from './network';
 import Service from './service';
-import ServiceManager from './service-manager';
+import * as serviceManager from './service-manager';
 import Volume from './volume';
 
 import { checkTruthy } from '../lib/validation';
-import { NetworkManager } from './network-manager';
-import VolumeManager from './volume-manager';
+import * as networkManager from './network-manager';
+import * as volumeManager from './volume-manager';
+import { DeviceReportFields } from '../types/state';
 
 interface BaseCompositionStepArgs {
 	force?: boolean;
@@ -35,7 +37,6 @@ interface CompositionStepArgs {
 		options?: {
 			skipLock?: boolean;
 			wait?: boolean;
-			removeImage?: boolean;
 		};
 	} & BaseCompositionStepArgs;
 	remove: {
@@ -43,7 +44,7 @@ interface CompositionStepArgs {
 	} & BaseCompositionStepArgs;
 	updateMetadata: {
 		current: Service;
-		target: { imageId: number; releaseId: number };
+		target: Service;
 		options?: {
 			skipLock?: boolean;
 		};
@@ -67,6 +68,7 @@ interface CompositionStepArgs {
 		target: Service;
 		options?: {
 			skipLock?: boolean;
+			timeout?: number;
 		};
 	} & BaseCompositionStepArgs;
 	fetch: {
@@ -93,25 +95,27 @@ interface CompositionStepArgs {
 		current: Volume;
 	};
 	ensureSupervisorNetwork: {};
+	noop: {};
 }
 
-type CompositionStepAction = keyof CompositionStepArgs;
-type CompositionStep<T extends CompositionStepAction> = {
-	step: T;
+export type CompositionStepAction = keyof CompositionStepArgs;
+export type CompositionStepT<T extends CompositionStepAction> = {
+	action: T;
 } & CompositionStepArgs[T];
+export type CompositionStep = CompositionStepT<CompositionStepAction>;
 
 export function generateStep<T extends CompositionStepAction>(
 	action: T,
 	args: CompositionStepArgs[T],
-): CompositionStep<T> {
+): CompositionStep {
 	return {
-		step: action,
+		action,
 		...args,
 	};
 }
 
 type Executors<T extends CompositionStepAction> = {
-	[key in T]: (step: CompositionStep<key>) => Promise<unknown>;
+	[key in T]: (step: CompositionStepT<key>) => Promise<unknown>;
 };
 type LockingFn = (
 	// TODO: Once the entire codebase is typescript, change
@@ -129,22 +133,16 @@ interface CompositionCallbacks {
 	fetchStart: () => void;
 	fetchEnd: () => void;
 	fetchTime: (time: number) => void;
-	stateReport: (state: Dictionary<unknown>) => Promise<void>;
+	stateReport: (state: DeviceReportFields) => void;
 	bestDeltaSource: (image: Image, available: Image[]) => string | null;
 }
 
 export function getExecutors(app: {
 	lockFn: LockingFn;
-	services: ServiceManager;
-	networks: NetworkManager;
-	volumes: VolumeManager;
-	applications: ApplicationManager;
-	images: Images;
-	config: Config;
 	callbacks: CompositionCallbacks;
 }) {
 	const executors: Executors<CompositionStepAction> = {
-		stop: step => {
+		stop: (step) => {
 			return app.lockFn(
 				step.current.appId,
 				{
@@ -153,7 +151,7 @@ export function getExecutors(app: {
 				},
 				async () => {
 					const wait = _.get(step, ['options', 'wait'], false);
-					await app.services.kill(step.current, {
+					await serviceManager.kill(step.current, {
 						removeContainer: false,
 						wait,
 					});
@@ -161,7 +159,7 @@ export function getExecutors(app: {
 				},
 			);
 		},
-		kill: step => {
+		kill: (step) => {
 			return app.lockFn(
 				step.current.appId,
 				{
@@ -169,20 +167,17 @@ export function getExecutors(app: {
 					skipLock: step.skipLock || _.get(step, ['options', 'skipLock']),
 				},
 				async () => {
-					await app.services.kill(step.current);
+					await serviceManager.kill(step.current);
 					app.callbacks.containerKilled(step.current.containerId);
-					if (_.get(step, ['options', 'removeImage'])) {
-						await app.images.removeByDockerId(step.current.config.image);
-					}
 				},
 			);
 		},
-		remove: async step => {
+		remove: async (step) => {
 			// Only called for dead containers, so no need to
 			// take locks
-			await app.services.remove(step.current);
+			await serviceManager.remove(step.current);
 		},
-		updateMetadata: step => {
+		updateMetadata: (step) => {
 			const skipLock =
 				step.skipLock ||
 				checkTruthy(step.current.config.labels['io.balena.legacy-container']);
@@ -193,11 +188,11 @@ export function getExecutors(app: {
 					skipLock: skipLock || _.get(step, ['options', 'skipLock']),
 				},
 				async () => {
-					await app.services.updateMetadata(step.current, step.target);
+					await serviceManager.updateMetadata(step.current, step.target);
 				},
 			);
 		},
-		restart: step => {
+		restart: (step) => {
 			return app.lockFn(
 				step.current.appId,
 				{
@@ -205,27 +200,27 @@ export function getExecutors(app: {
 					skipLock: step.skipLock || _.get(step, ['options', 'skipLock']),
 				},
 				async () => {
-					await app.services.kill(step.current, { wait: true });
+					await serviceManager.kill(step.current, { wait: true });
 					app.callbacks.containerKilled(step.current.containerId);
-					const container = await app.services.start(step.target);
+					const container = await serviceManager.start(step.target);
 					app.callbacks.containerStarted(container.id);
 				},
 			);
 		},
-		stopAll: async step => {
-			await app.applications.stopAll({
+		stopAll: async (step) => {
+			await applicationManager.stopAll({
 				force: step.force,
 				skipLock: step.skipLock,
 			});
 		},
-		start: async step => {
-			const container = await app.services.start(step.target);
+		start: async (step) => {
+			const container = await serviceManager.start(step.target);
 			app.callbacks.containerStarted(container.id);
 		},
-		updateCommit: async step => {
-			await app.config.set({ currentCommit: step.target });
+		updateCommit: async (step) => {
+			await config.set({ currentCommit: step.target });
 		},
-		handover: step => {
+		handover: (step) => {
 			return app.lockFn(
 				step.current.appId,
 				{
@@ -233,16 +228,16 @@ export function getExecutors(app: {
 					skipLock: step.skipLock || _.get(step, ['options', 'skipLock']),
 				},
 				async () => {
-					await app.services.handover(step.current, step.target);
+					await serviceManager.handover(step.current, step.target);
 				},
 			);
 		},
-		fetch: async step => {
+		fetch: async (step) => {
 			const startTime = process.hrtime();
 			app.callbacks.fetchStart();
 			const [fetchOpts, availableImages] = await Promise.all([
-				app.config.get('fetchOptions'),
-				app.images.getAvailable(),
+				config.get('fetchOptions'),
+				images.getAvailable(),
 			]);
 
 			const opts = {
@@ -250,10 +245,10 @@ export function getExecutors(app: {
 				...fetchOpts,
 			};
 
-			await app.images.triggerFetch(
+			await images.triggerFetch(
 				step.image,
 				opts,
-				async success => {
+				async (success) => {
 					app.callbacks.fetchEnd();
 					const elapsed = process.hrtime(startTime);
 					const elapsedMs = elapsed[0] * 1000 + elapsed[1] / 1e6;
@@ -263,38 +258,41 @@ export function getExecutors(app: {
 						// been downloaded ,and it's relevant mostly for
 						// the legacy GET /v1/device endpoint that assumes
 						// a single container app
-						await app.callbacks.stateReport({ update_downloaded: true });
+						app.callbacks.stateReport({ update_downloaded: true });
 					}
 				},
 				step.serviceName,
 			);
 		},
-		removeImage: async step => {
-			await app.images.remove(step.image);
+		removeImage: async (step) => {
+			await images.remove(step.image);
 		},
-		saveImage: async step => {
-			await app.images.save(step.image);
+		saveImage: async (step) => {
+			await images.save(step.image);
 		},
 		cleanup: async () => {
-			const localMode = await app.config.get('localMode');
+			const localMode = await config.get('localMode');
 			if (!localMode) {
-				await app.images.cleanup();
+				await images.cleanup();
 			}
 		},
-		createNetwork: async step => {
-			await app.networks.create(step.target);
+		createNetwork: async (step) => {
+			await networkManager.create(step.target);
 		},
-		createVolume: async step => {
-			await app.volumes.create(step.target);
+		createVolume: async (step) => {
+			await volumeManager.create(step.target);
 		},
-		removeNetwork: async step => {
-			await app.networks.remove(step.current);
+		removeNetwork: async (step) => {
+			await networkManager.remove(step.current);
 		},
-		removeVolume: async step => {
-			await app.volumes.remove(step.current);
+		removeVolume: async (step) => {
+			await volumeManager.remove(step.current);
 		},
 		ensureSupervisorNetwork: async () => {
-			app.networks.ensureSupervisorNetwork();
+			networkManager.ensureSupervisorNetwork();
+		},
+		noop: async () => {
+			/* async noop */
 		},
 	};
 

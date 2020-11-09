@@ -1,18 +1,26 @@
-// TODO: This file was created by bulk-decaffeinate.
-// Sanity-check the conversion and remove this comment.
-/*
- * decaffeinate suggestions:
- * DS102: Remove unnecessary code created because of implicit returns
- * Full docs: https://github.com/decaffeinate/decaffeinate/blob/master/docs/suggestions.md
- */
 import * as fs from 'fs';
+import * as db from '../../src/db';
+import * as config from '../../src/config';
 
-export = function() {
-	try {
-		fs.unlinkSync(process.env.DATABASE_PATH!);
-	} catch (e) {
-		/* ignore /*/
-	}
+export = async function () {
+	await db.initialized;
+	await config.initialized;
+
+	await db.transaction(async (trx) => {
+		const result = await trx.raw(`
+			SELECT name, sql
+			FROM sqlite_master
+			WHERE type='table'`);
+		for (const r of result) {
+			// We don't run the migrations again
+			if (r.name !== 'knex_migrations') {
+				await trx.raw(`DELETE FROM ${r.name}`);
+			}
+		}
+		// The supervisor expects this value to already have
+		// been pre-populated
+		await trx('deviceConfig').insert({ targetValues: '{}' });
+	});
 
 	try {
 		fs.unlinkSync(process.env.DATABASE_PATH_2!);
@@ -46,11 +54,15 @@ export = function() {
 			'./test/data/config-apibinder-offline.json',
 			fs.readFileSync('./test/data/testconfig-apibinder-offline.json'),
 		);
-		return fs.writeFileSync(
+		fs.writeFileSync(
 			'./test/data/config-apibinder-offline2.json',
 			fs.readFileSync('./test/data/testconfig-apibinder-offline2.json'),
 		);
 	} catch (e) {
 		/* ignore /*/
 	}
+
+	// @ts-expect-error using private properties
+	config.configJsonBackend.cache = await config.configJsonBackend.read();
+	await config.generateRequiredFields();
 };

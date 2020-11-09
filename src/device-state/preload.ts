@@ -1,8 +1,12 @@
 import * as _ from 'lodash';
 import { fs } from 'mz';
 
-import { Image } from '../compose/images';
-import DeviceState = require('../device-state');
+import { Image, imageFromService } from '../compose/images';
+import * as deviceState from '../device-state';
+import * as config from '../config';
+import * as deviceConfig from '../device-config';
+import * as eventTracker from '../event-tracker';
+import * as images from '../compose/images';
 
 import constants = require('../lib/constants');
 import { AppsJsonParseError, EISDIR, ENOENT } from '../lib/errors';
@@ -13,7 +17,6 @@ import { AppsJsonFormat } from '../types/state';
 
 export async function loadTargetFromFile(
 	appsPath: Nullable<string>,
-	deviceState: DeviceState,
 ): Promise<void> {
 	log.info('Attempting to load any preloaded applications');
 	if (!appsPath) {
@@ -34,7 +37,7 @@ export async function loadTargetFromFile(
 
 		if (_.isArray(stateFromFile)) {
 			log.debug('Detected a legacy apps.json, converting...');
-			stateFromFile = convertLegacyAppsJson(stateFromFile);
+			stateFromFile = convertLegacyAppsJson(stateFromFile as any[]);
 		}
 		const preloadState = stateFromFile as AppsJsonFormat;
 
@@ -45,7 +48,7 @@ export async function loadTargetFromFile(
 			return;
 		}
 
-		const images: Image[] = [];
+		const imgs: Image[] = [];
 		const appIds = _.keys(preloadState.apps);
 		for (const appId of appIds) {
 			const app = preloadState.apps[appId];
@@ -61,37 +64,37 @@ export async function loadTargetFromFile(
 					imageName: service.image,
 					serviceName: service.serviceName,
 					imageId: service.imageId,
-					serviceId,
+					serviceId: parseInt(serviceId, 10),
 					releaseId: app.releaseId,
-					appId,
+					appId: parseInt(appId, 10),
 				};
-				images.push(await deviceState.applications.imageForService(svc));
+				imgs.push(imageFromService(svc));
 			}
 		}
 
-		for (const image of images) {
-			const name = await deviceState.applications.images.normalise(image.name);
+		for (const image of imgs) {
+			const name = await images.normalise(image.name);
 			image.name = name;
-			await deviceState.applications.images.save(image);
+			await images.save(image);
 		}
 
-		const deviceConf = await deviceState.deviceConfig.getCurrent();
-		const formattedConf = await deviceState.deviceConfig.formatConfigKeys(
-			preloadState.config,
-		);
+		const deviceConf = await deviceConfig.getCurrent();
+		const formattedConf = deviceConfig.formatConfigKeys(preloadState.config);
 		preloadState.config = { ...formattedConf, ...deviceConf };
-		const localState = { local: { name: '', ...preloadState } };
+		const localState = {
+			local: { name: '', ...preloadState },
+			dependent: { apps: [], devices: [] },
+		};
 
 		await deviceState.setTarget(localState);
-
 		log.success('Preloading complete');
-		if (stateFromFile.pinDevice) {
+		if (preloadState.pinDevice) {
 			// Multi-app warning!
 			// The following will need to be changed once running
 			// multiple applications is possible
 			if (commitToPin != null && appToPin != null) {
 				log.debug('Device will be pinned');
-				await deviceState.config.set({
+				await config.set({
 					pinDevice: {
 						commit: commitToPin,
 						app: parseInt(appToPin, 10),
@@ -107,7 +110,7 @@ export async function loadTargetFromFile(
 		if (ENOENT(e) || EISDIR(e)) {
 			log.debug('No apps.json file present, skipping preload');
 		} else {
-			deviceState.eventTracker.track('Loading preloaded apps failed', {
+			eventTracker.track('Loading preloaded apps failed', {
 				error: e,
 			});
 		}

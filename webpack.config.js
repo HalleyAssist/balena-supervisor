@@ -1,12 +1,13 @@
-var webpack = require('webpack');
-var path = require('path');
-var fs = require('fs');
-var _ = require('lodash');
-var path = require('path');
+const webpack = require('webpack');
+const path = require('path');
+const fs = require('fs');
+const _ = require('lodash');
 const CopyWebpackPlugin = require('copy-webpack-plugin');
-var ForkTsCheckerWebpackPlugin = require('fork-ts-checker-webpack-plugin');
+const ForkTsCheckerWebpackPlugin = require('fork-ts-checker-webpack-plugin');
+const TerserWebpackPlugin = require('terser-webpack-plugin');
 
 var externalModules = [
+	'async_hooks',
 	'sqlite3',
 	'mysql2',
 	'pg',
@@ -18,12 +19,13 @@ var externalModules = [
 	'oracledb',
 	'pg-query-stream',
 	'tedious',
+	'dbus',
 	/mssql\/.*/,
 ];
 
-var requiredModules = [];
-var maybeOptionalModules = [];
-lookForOptionalDeps = function(sourceDir) {
+let requiredModules = [];
+let maybeOptionalModules = [];
+const lookForOptionalDeps = function (sourceDir) {
 	// We iterate over the node modules and mark all optional dependencies as external
 	var dirs = fs.readdirSync(sourceDir);
 	for (let dir of dirs) {
@@ -34,19 +36,19 @@ lookForOptionalDeps = function(sourceDir) {
 		}
 		try {
 			packageJson = JSON.parse(
-				fs.readFileSync(path.join(sourceDir, dir, '/package.json'))
+				fs.readFileSync(path.join(sourceDir, dir, '/package.json'), 'utf8'),
 			);
 		} catch (e) {
 			continue;
 		}
 		if (packageJson.optionalDependencies != null) {
 			maybeOptionalModules = maybeOptionalModules.concat(
-				_.keys(packageJson.optionalDependencies)
+				_.keys(packageJson.optionalDependencies),
 			);
 		}
 		if (packageJson.dependencies != null) {
 			requiredModules = requiredModules.concat(
-				_.keys(packageJson.dependencies)
+				_.keys(packageJson.dependencies),
 			);
 		}
 	}
@@ -59,13 +61,13 @@ externalModules.push(
 			_.reject(maybeOptionalModules, requiredModules)
 				.map(_.escapeRegExp)
 				.join('|') +
-			')(/.*)?$'
-	)
+			')(/.*)?$',
+	),
 );
 
 console.log('Using the following dependencies as external:', externalModules);
 
-module.exports = function(env) {
+module.exports = function (env) {
 	return {
 		mode: env == null || !env.noOptimize ? 'production' : 'development',
 		devtool: 'none',
@@ -75,33 +77,46 @@ module.exports = function(env) {
 			path: path.resolve(__dirname, 'dist'),
 		},
 		resolve: {
-			extensions: ['.js', '.ts', '.json', '.coffee'],
+			extensions: ['.js', '.ts', '.json'],
+			alias: {
+				// Use the es2018 build instead of the default es2015 build
+				'pinejs-client-core': 'pinejs-client-core/es2018',
+			},
 		},
 		target: 'node',
 		node: {
 			__dirname: false,
 		},
+		optimization: {
+			minimize: true,
+			minimizer: [
+				new TerserWebpackPlugin({
+					terserOptions: {
+						mangle: false,
+						keep_classnames: true,
+					},
+				}),
+			],
+		},
 		module: {
 			rules: [
 				{
-					test: new RegExp(
-						_.escapeRegExp(path.join('knex', 'lib', 'migrate', 'index.js')) +
-							'$'
-					),
-					use: require.resolve('./hardcode-migrations'),
+					include: [
+						new RegExp(
+							_.escapeRegExp(path.join('knex', 'lib', 'migrate', 'sources')),
+						),
+					],
+					use: require.resolve('./build-utils/hardcode-migrations'),
 				},
 				{
 					test: new RegExp(
-						_.escapeRegExp(path.join('JSONStream', 'index.js')) + '$'
+						_.escapeRegExp(path.join('JSONStream', 'index.js')) + '$',
 					),
-					use: require.resolve('./fix-jsonstream'),
+					use: require.resolve('./build-utils/fix-jsonstream'),
 				},
 				{
-					test: /\.coffee$/,
-					use: require.resolve('coffee-loader'),
-				},
-				{
-					test: /\.ts$/,
+					test: /\.ts$|\.js$/,
+					exclude: /node_modules/,
 					use: [
 						{
 							loader: 'ts-loader',
@@ -114,14 +129,14 @@ module.exports = function(env) {
 				},
 			],
 		},
-		externals: (context, request, callback) => {
+		externals: (_context, request, callback) => {
 			for (let m of externalModules) {
 				if (
 					(typeof m === 'string' && m === request) ||
 					(m instanceof RegExp && m.test(request))
 				) {
 					return callback(null, 'commonjs ' + request);
-				} else if (typeof m != 'string' && !(m instanceof RegExp)) {
+				} else if (typeof m !== 'string' && !(m instanceof RegExp)) {
 					throw new Error('Invalid entry in external modules: ' + m);
 				}
 			}
@@ -131,15 +146,17 @@ module.exports = function(env) {
 			new ForkTsCheckerWebpackPlugin({
 				async: false,
 			}),
-			new CopyWebpackPlugin([
-				{
-					from: './src/migrations',
-					to: 'migrations',
-				},
-			]),
+			new CopyWebpackPlugin({
+				patterns: [
+					{
+						from: './build/migrations',
+						to: 'migrations',
+					},
+				],
+			}),
 			new webpack.ContextReplacementPlugin(
 				/\.\/migrations/,
-				path.resolve(__dirname, 'src/migrations')
+				path.resolve(__dirname, 'build/migrations'),
 			),
 		],
 	};

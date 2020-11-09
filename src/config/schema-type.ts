@@ -38,17 +38,13 @@ export const schemaTypes = {
 		type: t.string,
 		default: '',
 	},
-	deviceType: {
+	deviceArch: {
 		type: t.string,
 		default: 'unknown',
 	},
-	username: {
+	deviceType: {
 		type: t.string,
-		default: NullOrUndefined,
-	},
-	userId: {
-		type: PermissiveNumber,
-		default: NullOrUndefined,
+		default: 'unknown',
 	},
 	deviceId: {
 		type: PermissiveNumber,
@@ -86,12 +82,12 @@ export const schemaTypes = {
 		type: PermissiveBoolean,
 		default: false,
 	},
-
-	// Database types
-	apiSecret: {
+	initialDeviceName: {
 		type: t.string,
 		default: NullOrUndefined,
 	},
+
+	// Database types
 	name: {
 		type: t.string,
 		default: 'local',
@@ -166,6 +162,14 @@ export const schemaTypes = {
 		type: PermissiveBoolean,
 		default: false,
 	},
+	firewallMode: {
+		type: t.string,
+		default: NullOrUndefined,
+	},
+	hostDiscoverability: {
+		type: PermissiveBoolean,
+		default: true,
+	},
 
 	// Function schema types
 	// The type should be the value that the promise resolves
@@ -192,6 +196,10 @@ export const schemaTypes = {
 		type: t.union([t.string, NullOrUndefined]),
 		default: t.never,
 	},
+	macAddress: {
+		type: t.union([t.string, NullOrUndefined]),
+		default: t.never,
+	},
 	provisioningOptions: {
 		type: t.interface({
 			// These types are taken from the types of the individual
@@ -200,7 +208,6 @@ export const schemaTypes = {
 			// from the definitions above and still have the types work
 			uuid: t.union([t.string, NullOrUndefined]),
 			applicationId: t.union([PermissiveNumber, NullOrUndefined]),
-			userId: t.union([PermissiveNumber, NullOrUndefined]),
 			deviceType: t.string,
 			provisioningApiKey: t.union([t.string, NullOrUndefined]),
 			deviceApiKey: t.string,
@@ -220,11 +227,11 @@ export const schemaTypes = {
 			uuid: t.union([t.string, NullOrUndefined]),
 			listenPort: PermissiveNumber,
 			name: t.string,
-			apiSecret: t.union([t.string, NullOrUndefined]),
 			deviceApiKey: t.string,
 			apiEndpoint: t.string,
 			version: t.string,
 			deviceType: t.string,
+			deviceArch: t.string,
 			osVersion: t.union([t.string, NullOrUndefined]),
 		}),
 		default: t.never,

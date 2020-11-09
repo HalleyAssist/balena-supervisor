@@ -1,32 +1,43 @@
 import * as Bluebird from 'bluebird';
-import { NextFunction, Request, Response, Router } from 'express';
+import { NextFunction, Response, Router } from 'express';
 import * as _ from 'lodash';
-import { fs } from 'mz';
 
-import { ApplicationManager } from '../application-manager';
+import * as deviceState from '../device-state';
+import * as apiBinder from '../api-binder';
+import * as applicationManager from '../compose/application-manager';
+import {
+	CompositionStepAction,
+	generateStep,
+} from '../compose/composition-steps';
+import { getApp } from '../device-state/db-format';
 import { Service } from '../compose/service';
+import Volume from '../compose/volume';
+import * as config from '../config';
+import * as db from '../db';
+import * as deviceConfig from '../device-config';
+import * as logger from '../logger';
+import * as images from '../compose/images';
+import * as volumeManager from '../compose/volume-manager';
+import * as serviceManager from '../compose/service-manager';
+import { spawnJournalctl } from '../lib/journald';
 import {
 	appNotFoundMessage,
 	serviceNotFoundMessage,
 	v2ServiceEndpointInputErrorMessage,
 } from '../lib/messages';
-import { doPurge, doRestart, serviceAction } from './common';
-
-import Volume from '../compose/volume';
-import { spawnJournalctl } from '../lib/journald';
-
 import log from '../lib/supervisor-console';
 import supervisorVersion = require('../lib/supervisor-version');
 import { checkInt, checkTruthy } from '../lib/validation';
+import { isVPNActive } from '../network';
+import { doPurge, doRestart, safeStateClone } from './common';
+import { AuthorizedRequest } from '../lib/api-keys';
 
-export function createV2Api(router: Router, applications: ApplicationManager) {
-	const { _lockingIfNecessary, deviceState } = applications;
-
+export function createV2Api(router: Router) {
 	const handleServiceAction = (
-		req: Request,
+		req: AuthorizedRequest,
 		res: Response,
 		next: NextFunction,
-		action: any,
+		action: CompositionStepAction,
 	): Resolvable<void> => {
 		const { imageId, serviceName, force } = req.body;
 		const appId = checkInt(req.params.appId);
@@ -38,10 +49,20 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 			return;
 		}
 
-		return _lockingIfNecessary(appId, { force }, () => {
-			return applications
-				.getCurrentApp(appId)
-				.then(app => {
+		// handle the case where the appId is out of scope
+		if (!req.auth.isScoped({ apps: [appId] })) {
+			res.status(401).json({
+				status: 'failed',
+				message: 'Application is not available',
+			});
+			return;
+		}
+
+		return applicationManager.lockingIfNecessary(appId, { force }, () => {
+			return Promise.all([applicationManager.getCurrentApps(), getApp(appId)])
+				.then(([apps, targetApp]) => {
+					const app = apps[appId];
+
 					if (app == null) {
 						res.status(404).send(appNotFoundMessage);
 						return;
@@ -55,27 +76,41 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 					}
 
 					let service: Service | undefined;
+					let targetService: Service | undefined;
 					if (imageId != null) {
-						service = _.find(app.services, svc => svc.imageId === imageId);
+						service = _.find(app.services, (svc) => svc.imageId === imageId);
+						targetService = _.find(
+							targetApp.services,
+							(svc) => svc.imageId === imageId,
+						);
 					} else {
 						service = _.find(
 							app.services,
-							svc => svc.serviceName === serviceName,
+							(svc) => svc.serviceName === serviceName,
+						);
+						targetService = _.find(
+							targetApp.services,
+							(svc) => svc.serviceName === serviceName,
 						);
 					}
 					if (service == null) {
 						res.status(404).send(serviceNotFoundMessage);
 						return;
 					}
-					applications.setTargetVolatileForService(service.imageId!, {
+
+					applicationManager.setTargetVolatileForService(service.imageId!, {
 						running: action !== 'stop',
 					});
-					return applications
-						.executeStepAction(
-							serviceAction(action, service.serviceId!, service, service, {
+					return applicationManager
+						.executeStep(
+							generateStep(action, {
+								current: service,
+								target: targetService,
 								wait: true,
 							}),
-							{ skipLock: true },
+							{
+								skipLock: true,
+							},
 						)
 						.then(() => {
 							res.status(200).send('OK');
@@ -90,7 +125,7 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 
 	router.post(
 		'/v2/applications/:appId/purge',
-		(req: Request, res: Response, next: NextFunction) => {
+		(req: AuthorizedRequest, res: Response, next: NextFunction) => {
 			const { force } = req.body;
 			const appId = checkInt(req.params.appId);
 			if (!appId) {
@@ -100,7 +135,16 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 				});
 			}
 
-			return doPurge(applications, appId, force)
+			// handle the case where the application is out of scope
+			if (!req.auth.isScoped({ apps: [appId] })) {
+				res.status(401).json({
+					status: 'failed',
+					message: 'Application is not available',
+				});
+				return;
+			}
+
+			return doPurge(appId, force)
 				.then(() => {
 					res.status(200).send('OK');
 				})
@@ -125,7 +169,7 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 
 	router.post(
 		'/v2/applications/:appId/restart',
-		(req: Request, res: Response, next: NextFunction) => {
+		(req: AuthorizedRequest, res: Response, next: NextFunction) => {
 			const { force } = req.body;
 			const appId = checkInt(req.params.appId);
 			if (!appId) {
@@ -135,7 +179,16 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 				});
 			}
 
-			return doRestart(applications, appId, force)
+			// handle the case where the appId is out of scope
+			if (!req.auth.isScoped({ apps: [appId] })) {
+				res.status(401).json({
+					status: 'failed',
+					message: 'Application is not available',
+				});
+				return;
+			}
+
+			return doRestart(appId, force)
 				.then(() => {
 					res.status(200).send('OK');
 				})
@@ -146,16 +199,16 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 	// TODO: Support dependent applications when this feature is complete
 	router.get(
 		'/v2/applications/state',
-		async (_req: Request, res: Response, next: NextFunction) => {
+		async (req: AuthorizedRequest, res: Response, next: NextFunction) => {
 			// It's kinda hacky to access the services and db via the application manager
 			// maybe refactor this code
 			Bluebird.join(
-				applications.services.getStatus(),
-				applications.images.getStatus(),
-				applications.db.models('app').select(['appId', 'commit', 'name']),
+				serviceManager.getStatus(),
+				images.getStatus(),
+				db.models('app').select(['appId', 'commit', 'name']),
 				(
 					services,
-					images,
+					imgs,
 					apps: Array<{ appId: string; commit: string; name: string }>,
 				) => {
 					// Create an object which is keyed my application name
@@ -165,7 +218,7 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 							commit: string;
 							services: {
 								[serviceName: string]: {
-									status: string;
+									status?: string;
 									releaseId: number;
 									downloadProgress: number | null;
 								};
@@ -175,44 +228,52 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 
 					const appNameById: { [id: number]: string } = {};
 
-					apps.forEach(app => {
-						const appId = parseInt(app.appId, 10);
-						response[app.name] = {
-							appId,
-							commit: app.commit,
-							services: {},
-						};
+					// only access scoped apps
+					apps
+						.filter((app) =>
+							req.auth.isScoped({ apps: [parseInt(app.appId, 10)] }),
+						)
+						.forEach((app) => {
+							const appId = parseInt(app.appId, 10);
+							response[app.name] = {
+								appId,
+								commit: app.commit,
+								services: {},
+							};
 
-						appNameById[appId] = app.name;
-					});
-
-					images.forEach(img => {
-						const appName = appNameById[img.appId];
-						if (appName == null) {
-							log.warn(
-								`Image found for unknown application!\nImage: ${JSON.stringify(
-									img,
-								)}`,
-							);
-							return;
-						}
-
-						const svc = _.find(services, (service: Service) => {
-							return service.imageId === img.imageId;
+							appNameById[appId] = app.name;
 						});
 
-						let status: string;
-						if (svc == null) {
-							status = img.status;
-						} else {
-							status = svc.status || img.status;
-						}
-						response[appName].services[img.serviceName] = {
-							status,
-							releaseId: img.releaseId,
-							downloadProgress: img.downloadProgress || null,
-						};
-					});
+					// only access scoped images
+					imgs
+						.filter((img) => req.auth.isScoped({ apps: [img.appId] }))
+						.forEach((img) => {
+							const appName = appNameById[img.appId];
+							if (appName == null) {
+								log.warn(
+									`Image found for unknown application!\nImage: ${JSON.stringify(
+										img,
+									)}`,
+								);
+								return;
+							}
+
+							const svc = _.find(services, (service: Service) => {
+								return service.imageId === img.imageId;
+							});
+
+							let status: string | undefined;
+							if (svc == null) {
+								status = img.status;
+							} else {
+								status = svc.status || img.status;
+							}
+							response[appName].services[img.serviceName] = {
+								status,
+								releaseId: img.releaseId,
+								downloadProgress: img.downloadProgress || null,
+							};
+						});
 
 					res.status(200).json(response);
 				},
@@ -222,58 +283,58 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 
 	router.get(
 		'/v2/applications/:appId/state',
-		(_req: Request, res: Response, next: NextFunction) => {
-			// Get all services and their statuses, and return it
-			applications
-				.getStatus()
-				.then(apps => {
-					res.status(200).json(apps);
-				})
-				.catch(next);
+		async (req: AuthorizedRequest, res: Response) => {
+			// Check application ID provided is valid
+			const appId = checkInt(req.params.appId);
+			if (!appId) {
+				return res.status(400).json({
+					status: 'failed',
+					message: `Invalid application ID: ${req.params.appId}`,
+				});
+			}
+
+			// Query device for all applications
+			let apps: any;
+			try {
+				apps = await applicationManager.getStatus();
+			} catch (e) {
+				log.error(e.message);
+				return res.status(500).json({
+					status: 'failed',
+					message: `Unable to retrieve state for application ID: ${appId}`,
+				});
+			}
+			// Check if the application exists
+			if (!(appId in apps.local) || !req.auth.isScoped({ apps: [appId] })) {
+				return res.status(409).json({
+					status: 'failed',
+					message: `Application ID does not exist: ${appId}`,
+				});
+			}
+
+			// handle the case where the appId is out of scope
+			if (!req.auth.isScoped({ apps: [appId] })) {
+				res.status(401).json({
+					status: 'failed',
+					message: 'Application is not available',
+				});
+				return;
+			}
+
+			// Filter applications we do not want
+			for (const app in apps.local) {
+				if (app !== appId.toString()) {
+					delete apps.local[app];
+				}
+			}
+			// Return filtered applications
+			return res.status(200).json(apps);
 		},
 	);
 
 	router.get('/v2/local/target-state', async (_req, res) => {
 		const targetState = await deviceState.getTarget();
-
-		// We avoid using cloneDeep here, as the class
-		// instances can cause a maximum call stack exceeded
-		// error
-
-		// TODO: This should really return the config as it
-		// is returned from the api, but currently that's not
-		// the easiest thing due to the way they are stored and
-		// retrieved from the db - when all of the application
-		// manager is strongly typed, revisit this. The best
-		// thing to do would be to represent the input with
-		// io-ts and make sure the below conforms to it
-
-		const target: any = {
-			local: {
-				config: {},
-			},
-			dependent: {
-				config: {},
-			},
-		};
-		if (targetState.local != null) {
-			target.local = {
-				name: targetState.local.name,
-				config: _.cloneDeep(targetState.local.config),
-				apps: _.mapValues(targetState.local.apps, app => ({
-					appId: app.appId,
-					name: app.name,
-					commit: app.commit,
-					releaseId: app.releaseId,
-					services: _.map(app.services, s => s.toComposeObject()),
-					volumes: _.mapValues(app.volumes, v => v.toComposeObject()),
-					networks: _.mapValues(app.networks, n => n.toComposeObject()),
-				})),
-			};
-		}
-		if (targetState.dependent != null) {
-			target.dependent = _.cloneDeep(target.dependent);
-		}
+		const target = safeStateClone(targetState);
 
 		res.status(200).json({
 			status: 'success',
@@ -284,7 +345,7 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 	router.post('/v2/local/target-state', async (req, res) => {
 		// let's first ensure that we're in local mode, otherwise
 		// this function should not do anything
-		const localMode = await deviceState.config.get('localMode');
+		const localMode = await config.get('localMode');
 		if (!localMode) {
 			return res.status(400).json({
 				status: 'failed',
@@ -311,30 +372,40 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 	});
 
 	router.get('/v2/local/device-info', async (_req, res) => {
-		// Return the device type and slug so that local mode builds can use this to
-		// resolve builds
-		// FIXME: We should be mounting the following file into the supervisor from the
-		// start-resin-supervisor script, changed in meta-resin - but until then, hardcode it
-		const data = await fs.readFile(
-			'/mnt/root/resin-boot/device-type.json',
-			'utf8',
-		);
-		const deviceInfo = JSON.parse(data);
+		try {
+			const { deviceType, deviceArch } = await config.getMany([
+				'deviceType',
+				'deviceArch',
+			]);
 
-		return res.status(200).json({
-			status: 'success',
-			info: {
-				arch: deviceInfo.arch,
-				deviceType: deviceInfo.slug,
-			},
-		});
+			return res.status(200).json({
+				status: 'success',
+				info: {
+					arch: deviceArch,
+					deviceType,
+				},
+			});
+		} catch (e) {
+			res.status(500).json({
+				status: 'failed',
+				message: e.message,
+			});
+		}
 	});
 
 	router.get('/v2/local/logs', async (_req, res) => {
-		const backend = applications.logger.getLocalBackend();
-		backend.assignServiceNameResolver(
-			applications.serviceNameFromId.bind(applications),
-		);
+		const serviceNameCache: { [sId: number]: string } = {};
+		const backend = logger.getLocalBackend();
+		// Cache the service names to IDs per call to the endpoint
+		backend.assignServiceNameResolver(async (id: number) => {
+			if (id in serviceNameCache) {
+				return serviceNameCache[id];
+			} else {
+				const name = await applicationManager.serviceNameFromId(id);
+				serviceNameCache[id] = name;
+				return name;
+			}
+		});
 
 		// Get the stream, and stream it into res
 		const listenStream = backend.attachListener();
@@ -356,12 +427,17 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 		});
 	});
 
-	router.get('/v2/containerId', async (req, res) => {
-		const services = await applications.services.getAll();
+	router.get('/v2/containerId', async (req: AuthorizedRequest, res) => {
+		const services = (await serviceManager.getAll()).filter((service) =>
+			req.auth.isScoped({ apps: [service.appId] }),
+		);
 
 		if (req.query.serviceName != null || req.query.service != null) {
 			const serviceName = req.query.serviceName || req.query.service;
-			const service = _.find(services, svc => svc.serviceName === serviceName);
+			const service = _.find(
+				services,
+				(svc) => svc.serviceName === serviceName,
+			);
 			if (service != null) {
 				res.status(200).json({
 					status: 'success',
@@ -384,43 +460,47 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 		}
 	});
 
-	router.get('/v2/state/status', async (_req, res) => {
-		const currentRelease = await applications.config.get('currentCommit');
+	router.get('/v2/state/status', async (req: AuthorizedRequest, res) => {
+		const currentRelease = await config.get('currentCommit');
 
-		const pending = applications.deviceState.applyInProgress;
-		const containerStates = (await applications.services.getAll()).map(svc =>
-			_.pick(
-				svc,
-				'status',
-				'serviceName',
-				'appId',
-				'imageId',
-				'serviceId',
-				'containerId',
-				'createdAt',
-			),
-		);
+		const pending = deviceState.isApplyInProgress();
+		const containerStates = (await serviceManager.getAll())
+			.filter((service) => req.auth.isScoped({ apps: [service.appId] }))
+			.map((svc) =>
+				_.pick(
+					svc,
+					'status',
+					'serviceName',
+					'appId',
+					'imageId',
+					'serviceId',
+					'containerId',
+					'createdAt',
+				),
+			);
 
 		let downloadProgressTotal = 0;
 		let downloads = 0;
-		const imagesStates = (await applications.images.getStatus()).map(img => {
-			if (img.downloadProgress != null) {
-				downloadProgressTotal += img.downloadProgress;
-				downloads += 1;
-			}
-			return _.pick(
-				img,
-				'name',
-				'appId',
-				'serviceName',
-				'imageId',
-				'dockerImageId',
-				'status',
-				'downloadProgress',
-			);
-		});
+		const imagesStates = (await images.getStatus())
+			.filter((img) => req.auth.isScoped({ apps: [img.appId] }))
+			.map((img) => {
+				if (img.downloadProgress != null) {
+					downloadProgressTotal += img.downloadProgress;
+					downloads += 1;
+				}
+				return _.pick(
+					img,
+					'name',
+					'appId',
+					'serviceName',
+					'imageId',
+					'dockerImageId',
+					'status',
+					'downloadProgress',
+				);
+			});
 
-		let overallDownloadProgress = null;
+		let overallDownloadProgress: number | null = null;
 		if (downloads > 0) {
 			overallDownloadProgress = downloadProgressTotal / downloads;
 		}
@@ -436,7 +516,7 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 	});
 
 	router.get('/v2/device/name', async (_req, res) => {
-		const deviceName = await applications.config.get('name');
+		const deviceName = await config.get('name');
 		res.json({
 			status: 'success',
 			deviceName,
@@ -444,22 +524,51 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 	});
 
 	router.get('/v2/device/tags', async (_req, res) => {
-		const tags = await applications.apiBinder.fetchDeviceTags();
+		try {
+			const tags = await apiBinder.fetchDeviceTags();
+			return res.json({
+				status: 'success',
+				tags,
+			});
+		} catch (e) {
+			log.error(e);
+			res.status(500).json({
+				status: 'failed',
+				message: e.message,
+			});
+		}
+	});
+
+	router.get('/v2/device/vpn', async (_req, res) => {
+		const conf = await deviceConfig.getCurrent();
+		// Build VPNInfo
+		const info = {
+			enabled: conf.SUPERVISOR_VPN_CONTROL === 'true',
+			connected: await isVPNActive(),
+		};
+		// Return payload
 		return res.json({
 			status: 'success',
-			tags,
+			vpn: info,
 		});
 	});
 
-	router.get('/v2/cleanup-volumes', async (_req, res) => {
-		const targetState = await applications.getTargetApps();
+	router.get('/v2/cleanup-volumes', async (req: AuthorizedRequest, res) => {
+		const targetState = await applicationManager.getTargetApps();
 		const referencedVolumes: string[] = [];
-		_.each(targetState, app => {
-			_.each(app.volumes, vol => {
-				referencedVolumes.push(Volume.generateDockerName(vol.appId, vol.name));
+		_.each(targetState, (app, appId) => {
+			// if this app isn't in scope of the request, do not cleanup it's volumes
+			if (!req.auth.isScoped({ apps: [parseInt(appId, 10)] })) {
+				return;
+			}
+
+			_.each(app.volumes, (_volume, volumeName) => {
+				referencedVolumes.push(
+					Volume.generateDockerName(parseInt(appId, 10), volumeName),
+				);
 			});
 		});
-		await applications.volumes.removeOrphanedVolumes(referencedVolumes);
+		await volumeManager.removeOrphanedVolumes(referencedVolumes);
 		res.json({
 			status: 'success',
 		});
@@ -471,15 +580,24 @@ export function createV2Api(router: Router, applications: ApplicationManager) {
 		const count = checkInt(req.body.count, { positive: true }) || undefined;
 		const unit = req.body.unit;
 		const format = req.body.format || 'short';
+		const containerId = req.body.containerId;
 
-		const journald = spawnJournalctl({ all, follow, count, unit, format });
+		const journald = spawnJournalctl({
+			all,
+			follow,
+			count,
+			unit,
+			format,
+			containerId,
+		});
 		res.status(200);
-		journald.stdout.pipe(res);
+		// We know stdout will be present
+		journald.stdout!.pipe(res);
 		res.on('close', () => {
 			journald.kill('SIGKILL');
 		});
 		journald.on('exit', () => {
-			journald.stdout.unpipe();
+			journald.stdout!.unpipe();
 			res.end();
 		});
 	});

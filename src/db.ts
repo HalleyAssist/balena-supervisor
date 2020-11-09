@@ -1,70 +1,52 @@
-import * as Bluebird from 'bluebird';
 import * as Knex from 'knex';
 import * as path from 'path';
 
 import * as constants from './lib/constants';
 
-interface DBOpts {
-	databasePath?: string;
-}
-
 type DBTransactionCallback = (trx: Knex.Transaction) => void;
 
 export type Transaction = Knex.Transaction;
 
-export class DB {
-	private databasePath: string;
-	private knex: Knex;
+const databasePath = constants.databasePath;
+const knex = Knex({
+	client: 'sqlite3',
+	connection: {
+		filename: databasePath,
+	},
+	useNullAsDefault: true,
+});
 
-	public constructor({ databasePath }: DBOpts = {}) {
-		this.databasePath = databasePath || constants.databasePath;
-		this.knex = Knex({
-			client: 'sqlite3',
-			connection: {
-				filename: this.databasePath,
-			},
-			useNullAsDefault: true,
-		});
+export const initialized = (async () => {
+	try {
+		await knex('knex_migrations_lock').update({ is_locked: 0 });
+	} catch {
+		/* ignore */
 	}
+	return knex.migrate.latest({
+		directory: path.join(__dirname, 'migrations'),
+	});
+})();
 
-	public init(): Bluebird<void> {
-		return this.knex('knex_migrations_lock')
-			.update({ is_locked: 0 })
-			.catch(() => {
-				return;
-			})
-			.then(() => {
-				return this.knex.migrate.latest({
-					directory: path.join(__dirname, 'migrations'),
-				});
-			});
-	}
+export function models(modelName: string): Knex.QueryBuilder {
+	return knex(modelName);
+}
 
-	public models(modelName: string): Knex.QueryBuilder {
-		return this.knex(modelName);
-	}
+export async function upsertModel(
+	modelName: string,
+	obj: any,
+	id: Dictionary<unknown>,
+	trx?: Knex.Transaction,
+): Promise<any> {
+	const k = trx || knex;
 
-	public upsertModel(
-		modelName: string,
-		obj: any,
-		id: Dictionary<unknown>,
-		trx?: Knex.Transaction,
-	): Bluebird<any> {
-		const knex = trx || this.knex;
-
-		return knex(modelName)
-			.update(obj)
-			.where(id)
-			.then((n: number) => {
-				if (n === 0) {
-					return knex(modelName).insert(obj);
-				}
-			});
-	}
-
-	public transaction(cb: DBTransactionCallback): Bluebird<Knex.Transaction> {
-		return this.knex.transaction(cb);
+	const n = await k(modelName).update(obj).where(id);
+	if (n === 0) {
+		return k(modelName).insert(obj);
 	}
 }
 
-export default DB;
+export function transaction(
+	cb: DBTransactionCallback,
+): Promise<Knex.Transaction> {
+	return knex.transaction(cb);
+}

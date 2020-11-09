@@ -18,6 +18,8 @@ import {
 
 import log from '../lib/supervisor-console';
 
+import * as apiKeys from '../lib/api-keys';
+
 export function camelCaseConfig(
 	literalConfig: ConfigMap,
 ): ServiceComposeConfig {
@@ -309,75 +311,116 @@ export function formatDevice(deviceStr: string): DockerDevice {
 	};
 }
 
+export function dockerDeviceToStr(device: DockerDevice): string {
+	return `${device.PathOnHost}:${device.PathInContainer}:${device.CgroupPermissions}`;
+}
+
 // TODO: Export these strings to a constant lib, to
 // enable changing them easily
 // Mutates service
-export function addFeaturesFromLabels(
+export async function addFeaturesFromLabels(
 	service: Service,
 	options: DeviceMetadata,
-): void {
-	const setEnvVariables = function(key: string, val: string) {
+): Promise<void> {
+	const setEnvVariables = function (key: string, val: string) {
 		service.config.environment[`RESIN_${key}`] = val;
 		service.config.environment[`BALENA_${key}`] = val;
 	};
-	if (checkTruthy(service.config.labels['io.balena.features.dbus'])) {
-		service.config.volumes.push('/run/dbus:/host/run/dbus');
-	}
 
-	if (
-		checkTruthy(service.config.labels['io.balena.features.kernel-modules']) &&
-		options.hostPathExists.modules
-	) {
-		service.config.volumes.push('/lib/modules:/lib/modules');
-	}
-
-	if (
-		checkTruthy(service.config.labels['io.balena.features.firmware']) &&
-		options.hostPathExists.firmware
-	) {
-		service.config.volumes.push('/lib/firmware:/lib/firmware');
-	}
-
-	if (checkTruthy(service.config.labels['io.balena.features.balena-socket'])) {
-		service.config.volumes.push(
-			`${constants.dockerSocket}:${constants.dockerSocket}`,
-		);
-		if (service.config.environment['DOCKER_HOST'] == null) {
-			service.config.environment[
-				'DOCKER_HOST'
-			] = `unix://${constants.dockerSocket}`;
-		}
-		// We keep balena.sock for backwards compatibility
-		if (constants.dockerSocket !== '/var/run/balena.sock') {
+	const features = {
+		'io.balena.features.journal-logs': () => {
+			service.config.volumes.push('/var/log/journal:/var/log/journal:ro');
+			service.config.volumes.push('/run/log/journal:/run/log/journal:ro');
+			service.config.volumes.push('/etc/machine-id:/etc/machine-id:ro');
+		},
+		'io.balena.features.dbus': () =>
+			service.config.volumes.push('/run/dbus:/host/run/dbus'),
+		'io.balena.features.kernel-modules': () =>
+			options.hostPathExists.modules
+				? service.config.volumes.push('/lib/modules:/lib/modules')
+				: null,
+		'io.balena.features.firmware': () =>
+			options.hostPathExists.firmware
+				? service.config.volumes.push('/lib/firmware:/lib/firmware')
+				: null,
+		'io.balena.features.balena-socket': () => {
 			service.config.volumes.push(
-				`${constants.dockerSocket}:/var/run/balena.sock`,
+				`${constants.dockerSocket}:${constants.containerDockerSocket}`,
 			);
+
+			// Maintain the /var/run mount for backwards compatibility
+			service.config.volumes.push(
+				`${constants.dockerSocket}:${constants.dockerSocket}`,
+			);
+
+			if (service.config.environment['DOCKER_HOST'] == null) {
+				service.config.environment[
+					'DOCKER_HOST'
+				] = `unix://${constants.containerDockerSocket}`;
+			}
+			// We keep balena.sock for backwards compatibility
+			if (constants.dockerSocket !== '/var/run/balena.sock') {
+				service.config.volumes.push(
+					`${constants.dockerSocket}:/var/run/balena.sock`,
+				);
+			}
+		},
+		'io.balena.features.balena-api': () => {
+			setEnvVariables('API_KEY', options.deviceApiKey);
+			setEnvVariables('API_URL', options.apiEndpoint);
+		},
+		'io.balena.features.supervisor-api': async () => {
+			// create a app/service specific API secret
+			const apiSecret = await apiKeys.generateScopedKey(
+				service.appId,
+				service.serviceId,
+			);
+
+			const host = (() => {
+				if (service.config.networkMode === 'host') {
+					return '127.0.0.1';
+				} else {
+					service.config.networks[constants.supervisorNetworkInterface] = {};
+					return options.supervisorApiHost;
+				}
+			})();
+
+			setEnvVariables('SUPERVISOR_API_KEY', apiSecret);
+			setEnvVariables('SUPERVISOR_PORT', options.listenPort.toString());
+			setEnvVariables('SUPERVISOR_HOST', host);
+			setEnvVariables(
+				'SUPERVISOR_ADDRESS',
+				`http://${host}:${options.listenPort}`,
+			);
+		},
+		'io.balena.features.sysfs': () => service.config.volumes.push('/sys:/sys'),
+		'io.balena.features.procfs': () =>
+			service.config.volumes.push('/proc:/proc'),
+		'io.balena.features.gpu': () =>
+			// TODO once the compose-spec has an implementation we
+			// should probably follow that, for now we copy the
+			// bahavior of docker cli
+			// https://github.com/balena-os/balena-engine-cli/blob/19.03-balena/opts/gpus.go#L81-L89
+			service.config.deviceRequests.push({
+				Count: 1,
+				Capabilities: [['gpu']],
+			} as Dockerode.DeviceRequest),
+	};
+
+	for (const feature of Object.keys(features) as [keyof typeof features]) {
+		const fn = features[feature];
+		if (checkTruthy(service.config.labels[feature])) {
+			await fn();
 		}
 	}
 
-	if (checkTruthy(service.config.labels['io.balena.features.balena-api'])) {
-		setEnvVariables('API_KEY', options.deviceApiKey);
-		setEnvVariables('API_URL', options.apiEndpoint);
-	}
-
-	if (checkTruthy(service.config.labels['io.balena.features.supervisor-api'])) {
-		setEnvVariables('SUPERVISOR_PORT', options.listenPort.toString());
-		setEnvVariables('SUPERVISOR_API_KEY', options.apiSecret);
-		if (service.config.networkMode === 'host') {
-			setEnvVariables('SUPERVISOR_HOST', '127.0.0.1');
-			setEnvVariables(
-				'SUPERVISOR_ADDRESS',
-				`http://127.0.0.1:${options.listenPort}`,
-			);
-		} else {
-			setEnvVariables('SUPERVISOR_HOST', options.supervisorApiHost);
-			setEnvVariables(
-				'SUPERVISOR_ADDRESS',
-				`http://${options.supervisorApiHost}:${options.listenPort}`,
-			);
-			service.config.networks[constants.supervisorNetworkInterface] = {};
-		}
-	} else {
+	// This is a special case, and folding it into the
+	// structure above would unnecessarily complicate things.
+	// If we get more labels which would require different
+	// functions to be called, switch up the above code
+	if (
+		!checkTruthy(service.config.labels['io.balena.features.supervisor-api'])
+	) {
 		// Ensure that the user hasn't added 'supervisor0' to the service's list
 		// of networks
 		delete service.config.networks[constants.supervisorNetworkInterface];

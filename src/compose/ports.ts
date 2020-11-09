@@ -1,5 +1,5 @@
 import * as _ from 'lodash';
-import TypedError = require('typed-error');
+import { TypedError } from 'typed-error';
 
 // Adapted from https://github.com/docker/docker-py/blob/master/docker/utils/ports.py#L3
 const PORTS_REGEX = /^(?:(?:([a-fA-F\d.:]+):)?([\d]*)(?:-([\d]+))?:)?([\d]+)(?:-([\d]+))?(?:\/(udp|tcp))?$/;
@@ -18,7 +18,7 @@ export interface DockerPortOptions {
 	portBindings: PortBindings;
 }
 
-interface PortRange {
+export interface PortRange {
 	internalStart: number;
 	internalEnd: number;
 	externalStart: number;
@@ -70,7 +70,7 @@ export class PortMap {
 			this.ports.internalStart,
 			this.ports.internalEnd,
 		);
-		return _.map(internalRange, internal => {
+		return _.map(internalRange, (internal) => {
 			return `${internal}/${this.ports.protocol}`;
 		});
 	}
@@ -118,9 +118,9 @@ export class PortMap {
 	public static normalisePortMaps(portMaps: PortMap[]): PortMap[] {
 		// Fold any ranges into each other if possible
 		return _(portMaps)
-			.sortBy(p => p.ports.protocol)
-			.sortBy(p => p.ports.host)
-			.sortBy(p => p.ports.internalStart)
+			.sortBy((p) => p.ports.protocol)
+			.sortBy((p) => p.ports.host)
+			.sortBy((p) => p.ports.internalStart)
 			.reduce((res: PortMap[], p: PortMap) => {
 				const last = _.last(res);
 
@@ -141,7 +141,7 @@ export class PortMap {
 	}
 
 	public static fromComposePorts(ports: string[]): PortMap[] {
-		return PortMap.normalisePortMaps(ports.map(p => new PortMap(p)));
+		return PortMap.normalisePortMaps(ports.map((p) => new PortMap(p)));
 	}
 
 	private parsePortString(portStr: string): void {

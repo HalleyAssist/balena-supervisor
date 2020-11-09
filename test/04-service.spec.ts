@@ -8,6 +8,7 @@ import {
 	ServiceComposeConfig,
 	ServiceConfig,
 } from '../src/compose/types/service';
+import * as constants from '../src/lib/constants';
 
 const configs = {
 	simple: {
@@ -28,13 +29,14 @@ const configs = {
 };
 
 describe('compose/service', () => {
-	it('extends environment variables properly', () => {
+	it('extends environment variables properly', async () => {
 		const extendEnvVarsOpts = {
 			uuid: '1234',
 			appName: 'awesomeApp',
 			commit: 'abcdef',
 			name: 'awesomeDevice',
 			version: 'v1.0.0',
+			deviceArch: 'amd64',
 			deviceType: 'raspberry-pi',
 			osVersion: 'Resin OS 2.0.2',
 		};
@@ -49,7 +51,10 @@ describe('compose/service', () => {
 				A_VARIABLE: 'ITS_VALUE',
 			},
 		};
-		const s = Service.fromComposeObject(service, extendEnvVarsOpts as any);
+		const s = await Service.fromComposeObject(
+			service,
+			extendEnvVarsOpts as any,
+		);
 
 		expect(s.config.environment).to.deep.equal({
 			FOO: 'bar',
@@ -57,20 +62,20 @@ describe('compose/service', () => {
 			RESIN_APP_ID: '23',
 			RESIN_APP_NAME: 'awesomeApp',
 			RESIN_DEVICE_UUID: '1234',
+			RESIN_DEVICE_ARCH: 'amd64',
 			RESIN_DEVICE_TYPE: 'raspberry-pi',
 			RESIN_HOST_OS_VERSION: 'Resin OS 2.0.2',
 			RESIN_SERVICE_NAME: 'serviceName',
-			RESIN_SUPERVISOR_VERSION: 'v1.0.0',
 			RESIN_APP_LOCK_PATH: '/tmp/balena/updates.lock',
 			RESIN_SERVICE_KILL_ME_PATH: '/tmp/balena/handover-complete',
 			RESIN: '1',
 			BALENA_APP_ID: '23',
 			BALENA_APP_NAME: 'awesomeApp',
 			BALENA_DEVICE_UUID: '1234',
+			BALENA_DEVICE_ARCH: 'amd64',
 			BALENA_DEVICE_TYPE: 'raspberry-pi',
 			BALENA_HOST_OS_VERSION: 'Resin OS 2.0.2',
 			BALENA_SERVICE_NAME: 'serviceName',
-			BALENA_SUPERVISOR_VERSION: 'v1.0.0',
 			BALENA_APP_LOCK_PATH: '/tmp/balena/updates.lock',
 			BALENA_SERVICE_HANDOVER_COMPLETE_PATH: '/tmp/balena/handover-complete',
 			BALENA: '1',
@@ -78,8 +83,8 @@ describe('compose/service', () => {
 		});
 	});
 
-	it('returns the correct default bind mounts', () => {
-		const s = Service.fromComposeObject(
+	it('returns the correct default bind mounts', async () => {
+		const s = await Service.fromComposeObject(
 			{
 				appId: '1234',
 				serviceName: 'foo',
@@ -96,8 +101,8 @@ describe('compose/service', () => {
 		]);
 	});
 
-	it('produces the correct port bindings and exposed ports', () => {
-		const s = Service.fromComposeObject(
+	it('produces the correct port bindings and exposed ports', async () => {
+		const s = await Service.fromComposeObject(
 			{
 				appId: '1234',
 				serviceName: 'foo',
@@ -152,8 +157,8 @@ describe('compose/service', () => {
 		});
 	});
 
-	it('correctly handles port ranges', () => {
-		const s = Service.fromComposeObject(
+	it('correctly handles port ranges', async () => {
+		const s = await Service.fromComposeObject(
 			{
 				appId: '1234',
 				serviceName: 'foo',
@@ -204,9 +209,9 @@ describe('compose/service', () => {
 		});
 	});
 
-	it('should correctly handle large port ranges', function() {
+	it('should correctly handle large port ranges', async function () {
 		this.timeout(60000);
-		const s = Service.fromComposeObject(
+		const s = await Service.fromComposeObject(
 			{
 				appId: '1234',
 				serviceName: 'foo',
@@ -221,8 +226,8 @@ describe('compose/service', () => {
 		expect((s as any).generateExposeAndPorts()).to.not.throw;
 	});
 
-	it('should correctly report implied exposed ports from portMappings', () => {
-		const service = Service.fromComposeObject(
+	it('should correctly report implied exposed ports from portMappings', async () => {
+		const service = await Service.fromComposeObject(
 			{
 				appId: 123456,
 				serviceId: 123456,
@@ -237,9 +242,62 @@ describe('compose/service', () => {
 			.that.deep.equals(['80/tcp', '100/tcp']);
 	});
 
+	it('should correctly handle spaces in volume definitions', async () => {
+		const service = await Service.fromComposeObject(
+			{
+				appId: 123,
+				serviceId: 123,
+				serviceName: 'test',
+				volumes: [
+					'vol1:vol2',
+					'vol3 :/usr/src/app',
+					'vol4: /usr/src/app',
+					'vol5 : vol6',
+				],
+			},
+			{ appName: 'test' } as any,
+		);
+
+		expect(service.config)
+			.to.have.property('volumes')
+			.that.deep.equals([
+				'123_vol1:vol2',
+				'123_vol3:/usr/src/app',
+				'123_vol4:/usr/src/app',
+				'123_vol5:vol6',
+
+				'/tmp/balena-supervisor/services/123/test:/tmp/resin',
+				'/tmp/balena-supervisor/services/123/test:/tmp/balena',
+			]);
+	});
+
+	it('should correctly handle io.balena.features.balena-socket label', async () => {
+		const service = await Service.fromComposeObject(
+			{
+				appId: 123456,
+				serviceId: 123456,
+				serviceName: 'foobar',
+				labels: {
+					'io.balena.features.balena-socket': '1',
+				},
+			},
+			{ appName: 'test' } as any,
+		);
+
+		expect(service.config.volumes).to.include.members([
+			`${constants.dockerSocket}:${constants.dockerSocket}`,
+			`${constants.dockerSocket}:/host/run/balena-engine.sock`,
+			`${constants.dockerSocket}:/var/run/balena.sock`,
+		]);
+
+		expect(service.config.environment['DOCKER_HOST']).to.equal(
+			'unix:///host/run/balena-engine.sock',
+		);
+	});
+
 	describe('Ordered array parameters', () => {
-		it('Should correctly compare ordered array parameters', () => {
-			const svc1 = Service.fromComposeObject(
+		it('Should correctly compare ordered array parameters', async () => {
+			const svc1 = await Service.fromComposeObject(
 				{
 					appId: 1,
 					serviceId: 1,
@@ -248,7 +306,7 @@ describe('compose/service', () => {
 				},
 				{ appName: 'test' } as any,
 			);
-			let svc2 = Service.fromComposeObject(
+			let svc2 = await Service.fromComposeObject(
 				{
 					appId: 1,
 					serviceId: 1,
@@ -259,7 +317,7 @@ describe('compose/service', () => {
 			);
 			assert(svc1.isEqualConfig(svc2, {}));
 
-			svc2 = Service.fromComposeObject(
+			svc2 = await Service.fromComposeObject(
 				{
 					appId: 1,
 					serviceId: 1,
@@ -271,8 +329,8 @@ describe('compose/service', () => {
 			assert(!svc1.isEqualConfig(svc2, {}));
 		});
 
-		it('should correctly compare non-ordered array parameters', () => {
-			const svc1 = Service.fromComposeObject(
+		it('should correctly compare non-ordered array parameters', async () => {
+			const svc1 = await Service.fromComposeObject(
 				{
 					appId: 1,
 					serviceId: 1,
@@ -281,7 +339,7 @@ describe('compose/service', () => {
 				},
 				{ appName: 'test' } as any,
 			);
-			let svc2 = Service.fromComposeObject(
+			let svc2 = await Service.fromComposeObject(
 				{
 					appId: 1,
 					serviceId: 1,
@@ -292,7 +350,7 @@ describe('compose/service', () => {
 			);
 			assert(svc1.isEqualConfig(svc2, {}));
 
-			svc2 = Service.fromComposeObject(
+			svc2 = await Service.fromComposeObject(
 				{
 					appId: 1,
 					serviceId: 1,
@@ -304,8 +362,8 @@ describe('compose/service', () => {
 			assert(svc1.isEqualConfig(svc2, {}));
 		});
 
-		it('should correctly compare both ordered and non-ordered array parameters', () => {
-			const svc1 = Service.fromComposeObject(
+		it('should correctly compare both ordered and non-ordered array parameters', async () => {
+			const svc1 = await Service.fromComposeObject(
 				{
 					appId: 1,
 					serviceId: 1,
@@ -315,7 +373,7 @@ describe('compose/service', () => {
 				},
 				{ appName: 'test' } as any,
 			);
-			const svc2 = Service.fromComposeObject(
+			const svc2 = await Service.fromComposeObject(
 				{
 					appId: 1,
 					serviceId: 1,
@@ -330,8 +388,8 @@ describe('compose/service', () => {
 	});
 
 	describe('parseMemoryNumber()', () => {
-		const makeComposeServiceWithLimit = (memLimit?: string | number) =>
-			Service.fromComposeObject(
+		const makeComposeServiceWithLimit = async (memLimit?: string | number) =>
+			await Service.fromComposeObject(
 				{
 					appId: 123456,
 					serviceId: 123456,
@@ -341,74 +399,82 @@ describe('compose/service', () => {
 				{ appName: 'test' } as any,
 			);
 
-		it('should correctly parse memory number strings without a unit', () =>
-			expect(makeComposeServiceWithLimit('64').config.memLimit).to.equal(64));
+		it('should correctly parse memory number strings without a unit', async () =>
+			expect(
+				(await makeComposeServiceWithLimit('64')).config.memLimit,
+			).to.equal(64));
 
-		it('should correctly apply the default value', () =>
-			expect(makeComposeServiceWithLimit(undefined).config.memLimit).to.equal(
-				0,
+		it('should correctly apply the default value', async () =>
+			expect(
+				(await makeComposeServiceWithLimit(undefined)).config.memLimit,
+			).to.equal(0));
+
+		it('should correctly support parsing numbers as memory limits', async () =>
+			expect((await makeComposeServiceWithLimit(64)).config.memLimit).to.equal(
+				64,
 			));
 
-		it('should correctly support parsing numbers as memory limits', () =>
-			expect(makeComposeServiceWithLimit(64).config.memLimit).to.equal(64));
-
-		it('should correctly parse memory number strings that use a byte unit', () => {
-			expect(makeComposeServiceWithLimit('64b').config.memLimit).to.equal(64);
-			expect(makeComposeServiceWithLimit('64B').config.memLimit).to.equal(64);
+		it('should correctly parse memory number strings that use a byte unit', async () => {
+			expect(
+				(await makeComposeServiceWithLimit('64b')).config.memLimit,
+			).to.equal(64);
+			expect(
+				(await makeComposeServiceWithLimit('64B')).config.memLimit,
+			).to.equal(64);
 		});
 
-		it('should correctly parse memory number strings that use a kilobyte unit', () => {
-			expect(makeComposeServiceWithLimit('64k').config.memLimit).to.equal(
-				65536,
-			);
-			expect(makeComposeServiceWithLimit('64K').config.memLimit).to.equal(
-				65536,
-			);
+		it('should correctly parse memory number strings that use a kilobyte unit', async () => {
+			expect(
+				(await makeComposeServiceWithLimit('64k')).config.memLimit,
+			).to.equal(65536);
+			expect(
+				(await makeComposeServiceWithLimit('64K')).config.memLimit,
+			).to.equal(65536);
 
-			expect(makeComposeServiceWithLimit('64kb').config.memLimit).to.equal(
-				65536,
-			);
-			expect(makeComposeServiceWithLimit('64Kb').config.memLimit).to.equal(
-				65536,
-			);
+			expect(
+				(await makeComposeServiceWithLimit('64kb')).config.memLimit,
+			).to.equal(65536);
+			expect(
+				(await makeComposeServiceWithLimit('64Kb')).config.memLimit,
+			).to.equal(65536);
 		});
 
-		it('should correctly parse memory number strings that use a megabyte unit', () => {
-			expect(makeComposeServiceWithLimit('64m').config.memLimit).to.equal(
-				67108864,
-			);
-			expect(makeComposeServiceWithLimit('64M').config.memLimit).to.equal(
-				67108864,
-			);
+		it('should correctly parse memory number strings that use a megabyte unit', async () => {
+			expect(
+				(await makeComposeServiceWithLimit('64m')).config.memLimit,
+			).to.equal(67108864);
+			expect(
+				(await makeComposeServiceWithLimit('64M')).config.memLimit,
+			).to.equal(67108864);
 
-			expect(makeComposeServiceWithLimit('64mb').config.memLimit).to.equal(
-				67108864,
-			);
-			expect(makeComposeServiceWithLimit('64Mb').config.memLimit).to.equal(
-				67108864,
-			);
+			expect(
+				(await makeComposeServiceWithLimit('64mb')).config.memLimit,
+			).to.equal(67108864);
+			expect(
+				(await makeComposeServiceWithLimit('64Mb')).config.memLimit,
+			).to.equal(67108864);
 		});
 
-		it('should correctly parse memory number strings that use a gigabyte unit', () => {
-			expect(makeComposeServiceWithLimit('64g').config.memLimit).to.equal(
-				68719476736,
-			);
-			expect(makeComposeServiceWithLimit('64G').config.memLimit).to.equal(
-				68719476736,
-			);
+		it('should correctly parse memory number strings that use a gigabyte unit', async () => {
+			expect(
+				(await makeComposeServiceWithLimit('64g')).config.memLimit,
+			).to.equal(68719476736);
+			expect(
+				(await makeComposeServiceWithLimit('64G')).config.memLimit,
+			).to.equal(68719476736);
 
-			expect(makeComposeServiceWithLimit('64gb').config.memLimit).to.equal(
-				68719476736,
-			);
-			expect(makeComposeServiceWithLimit('64Gb').config.memLimit).to.equal(
-				68719476736,
-			);
+			expect(
+				(await makeComposeServiceWithLimit('64gb')).config.memLimit,
+			).to.equal(68719476736);
+			expect(
+				(await makeComposeServiceWithLimit('64Gb')).config.memLimit,
+			).to.equal(68719476736);
 		});
 	});
 
 	describe('getWorkingDir', () => {
-		const makeComposeServiceWithWorkdir = (workdir?: string) =>
-			Service.fromComposeObject(
+		const makeComposeServiceWithWorkdir = async (workdir?: string) =>
+			await Service.fromComposeObject(
 				{
 					appId: 123456,
 					serviceId: 123456,
@@ -418,17 +484,56 @@ describe('compose/service', () => {
 				{ appName: 'test' } as any,
 			);
 
-		it('should remove a trailing slash', () => {
+		it('should remove a trailing slash', async () => {
 			expect(
-				makeComposeServiceWithWorkdir('/usr/src/app/').config.workingDir,
+				(await makeComposeServiceWithWorkdir('/usr/src/app/')).config
+					.workingDir,
 			).to.equal('/usr/src/app');
-			expect(makeComposeServiceWithWorkdir('/').config.workingDir).to.equal(
-				'/',
+			expect(
+				(await makeComposeServiceWithWorkdir('/')).config.workingDir,
+			).to.equal('/');
+			expect(
+				(await makeComposeServiceWithWorkdir('/usr/src/app')).config.workingDir,
+			).to.equal('/usr/src/app');
+			expect(
+				(await makeComposeServiceWithWorkdir('')).config.workingDir,
+			).to.equal('');
+		});
+	});
+
+	describe('io.balena.features.gpu: Docker <-> Compose config', () => {
+		const gpuDeviceRequest = {
+			Count: 1,
+			Capabilities: [['gpu']],
+		};
+		it('should succeed from compose object', async () => {
+			const s = await Service.fromComposeObject(
+				{
+					appId: 123,
+					serviceId: 123,
+					serviceName: 'test',
+					labels: {
+						'io.balena.features.gpu': '1',
+					},
+				},
+				{ appName: 'test' } as any,
 			);
-			expect(
-				makeComposeServiceWithWorkdir('/usr/src/app').config.workingDir,
-			).to.equal('/usr/src/app');
-			expect(makeComposeServiceWithWorkdir('').config.workingDir).to.equal('');
+
+			expect(s.config)
+				.to.have.property('deviceRequests')
+				.that.deep.equals([gpuDeviceRequest]);
+		});
+
+		it('should succeed from docker container', () => {
+			const dockerCfg = _.cloneDeep(
+				require('./data/docker-states/simple/inspect.json'),
+			);
+			dockerCfg.HostConfig.DeviceRequests = [gpuDeviceRequest];
+			const s = Service.fromDockerContainer(dockerCfg);
+
+			expect(s.config)
+				.to.have.property('deviceRequests')
+				.that.deep.equals([gpuDeviceRequest]);
 		});
 	});
 
@@ -436,8 +541,8 @@ describe('compose/service', () => {
 		const omitConfigForComparison = (config: ServiceConfig) =>
 			_.omit(config, ['running', 'networks']);
 
-		it('should be identical when converting a simple service', () => {
-			const composeSvc = Service.fromComposeObject(
+		it('should be identical when converting a simple service', async () => {
+			const composeSvc = await Service.fromComposeObject(
 				configs.simple.compose,
 				configs.simple.imageInfo,
 			);
@@ -450,8 +555,8 @@ describe('compose/service', () => {
 			expect(dockerSvc.isEqualConfig(composeSvc, {})).to.be.true;
 		});
 
-		it('should correct convert formats with a null entrypoint', () => {
-			const composeSvc = Service.fromComposeObject(
+		it('should correctly convert formats with a null entrypoint', async () => {
+			const composeSvc = await Service.fromComposeObject(
 				configs.entrypoint.compose,
 				configs.entrypoint.imageInfo,
 			);
@@ -465,11 +570,11 @@ describe('compose/service', () => {
 		});
 
 		describe('Networks', () => {
-			it('should correctly convert networks from compose to docker format', () => {
-				const makeComposeServiceWithNetwork = (
+			it('should correctly convert networks from compose to docker format', async () => {
+				const makeComposeServiceWithNetwork = async (
 					networks: ServiceComposeConfig['networks'],
 				) =>
-					Service.fromComposeObject(
+					await Service.fromComposeObject(
 						{
 							appId: 123456,
 							serviceId: 123456,
@@ -480,11 +585,13 @@ describe('compose/service', () => {
 					);
 
 				expect(
-					makeComposeServiceWithNetwork({
-						balena: {
-							ipv4Address: '1.2.3.4',
-						},
-					}).toDockerContainer({ deviceName: 'foo' } as any).NetworkingConfig,
+					(
+						await makeComposeServiceWithNetwork({
+							balena: {
+								ipv4Address: '1.2.3.4',
+							},
+						})
+					).toDockerContainer({ deviceName: 'foo' } as any).NetworkingConfig,
 				).to.deep.equal({
 					EndpointsConfig: {
 						'123456_balena': {
@@ -497,14 +604,16 @@ describe('compose/service', () => {
 				});
 
 				expect(
-					makeComposeServiceWithNetwork({
-						balena: {
-							aliases: ['test', '1123'],
-							ipv4Address: '1.2.3.4',
-							ipv6Address: '5.6.7.8',
-							linkLocalIps: ['123.123.123'],
-						},
-					}).toDockerContainer({ deviceName: 'foo' } as any).NetworkingConfig,
+					(
+						await makeComposeServiceWithNetwork({
+							balena: {
+								aliases: ['test', '1123'],
+								ipv4Address: '1.2.3.4',
+								ipv6Address: '5.6.7.8',
+								linkLocalIps: ['123.123.123'],
+							},
+						})
+					).toDockerContainer({ deviceName: 'foo' } as any).NetworkingConfig,
 				).to.deep.equal({
 					EndpointsConfig: {
 						'123456_balena': {
@@ -570,8 +679,8 @@ describe('compose/service', () => {
 		});
 
 		return describe('Network mode=service:', () => {
-			it('should correctly add a depends_on entry for the service', () => {
-				let s = Service.fromComposeObject(
+			it('should correctly add a depends_on entry for the service', async () => {
+				let s = await Service.fromComposeObject(
 					{
 						appId: '1234',
 						serviceName: 'foo',
@@ -585,7 +694,7 @@ describe('compose/service', () => {
 
 				expect(s.dependsOn).to.deep.equal(['test']);
 
-				s = Service.fromComposeObject(
+				s = await Service.fromComposeObject(
 					{
 						appId: '1234',
 						serviceName: 'foo',
@@ -601,8 +710,8 @@ describe('compose/service', () => {
 				expect(s.dependsOn).to.deep.equal(['another_service', 'test']);
 			});
 
-			it('should correctly convert a network_mode service: to a container:', () => {
-				const s = Service.fromComposeObject(
+			it('should correctly convert a network_mode service: to a container:', async () => {
+				const s = await Service.fromComposeObject(
 					{
 						appId: '1234',
 						serviceName: 'foo',
@@ -624,8 +733,8 @@ describe('compose/service', () => {
 					.that.equals('container:abcdef');
 			});
 
-			it('should not cause a container restart if a service: container has not changed', () => {
-				const composeSvc = Service.fromComposeObject(
+			it('should not cause a container restart if a service: container has not changed', async () => {
+				const composeSvc = await Service.fromComposeObject(
 					configs.networkModeService.compose,
 					configs.networkModeService.imageInfo,
 				);
@@ -641,8 +750,8 @@ describe('compose/service', () => {
 					.true;
 			});
 
-			it('should restart a container when its dependent network mode container changes', () => {
-				const composeSvc = Service.fromComposeObject(
+			it('should restart a container when its dependent network mode container changes', async () => {
+				const composeSvc = await Service.fromComposeObject(
 					configs.networkModeService.compose,
 					configs.networkModeService.imageInfo,
 				);

@@ -42,13 +42,19 @@ export function enableCheck(enable: boolean) {
 	isConnectivityCheckEnabled = enable;
 }
 
-async function vpnStatusInotifyCallback(): Promise<void> {
+export async function isVPNActive(): Promise<boolean> {
+	let active: boolean = true;
 	try {
 		await fs.lstat(`${constants.vpnStatusPath}/active`);
-		isConnectivityCheckPaused = true;
-	} catch {
-		isConnectivityCheckPaused = false;
+	} catch (e) {
+		active = false;
 	}
+	log.info(`VPN connection is ${active ? 'active' : 'not active'}.`);
+	return active;
+}
+
+async function vpnStatusInotifyCallback(): Promise<void> {
+	isConnectivityCheckPaused = await isVPNActive();
 }
 
 export const startConnectivityCheck = _.once(
@@ -80,12 +86,12 @@ export const startConnectivityCheck = _.once(
 
 		customMonitor(
 			{
-				host: parsedUrl.hostname,
+				host: parsedUrl.hostname ?? undefined,
 				port: port || (parsedUrl.protocol === 'https' ? 443 : 80),
 				path: parsedUrl.path || '/',
 				interval: 10 * 1000,
 			},
-			connected => {
+			(connected) => {
 				onChangeCallback?.(connected);
 				if (connected) {
 					log.info('Internet Connectivity: OK');
@@ -111,6 +117,9 @@ export const connectivityCheckEnabled = Bluebird.method(
 );
 
 const IP_REGEX = /^(?:balena|docker|rce|tun)[0-9]+|tun[0-9]+|resin-vpn|lo|resin-dns|supervisor0|balena-redsocks|resin-redsocks|br-[0-9a-f]{12}$/;
+
+export const shouldReportInterface = (intf: string) => !IP_REGEX.test(intf);
+
 export function getIPAddresses(): string[] {
 	// We get IP addresses but ignore:
 	// - docker and balena bridges (docker0, docker1, balena0, etc)
@@ -122,10 +131,12 @@ export function getIPAddresses(): string[] {
 	// - the docker network for the supervisor API (supervisor0)
 	// - custom docker network bridges (br- + 12 hex characters)
 	return _(os.networkInterfaces())
-		.omitBy((_interfaceFields, interfaceName) => IP_REGEX.test(interfaceName))
-		.flatMap(validInterfaces => {
+		.filter((_interfaceFields, interfaceName) =>
+			shouldReportInterface(interfaceName),
+		)
+		.flatMap((validInterfaces) => {
 			return _(validInterfaces)
-				.pickBy({ family: 'IPv4' })
+				.pickBy({ family: 'IPv4', internal: false })
 				.map('address')
 				.value();
 		})
@@ -140,11 +151,7 @@ export function startIPAddressUpdate(): (
 	return (cb, interval) => {
 		const getAndReportIP = () => {
 			const ips = getIPAddresses();
-			if (
-				!_(ips)
-					.xor(lastIPValues)
-					.isEmpty()
-			) {
+			if (!_(ips).xor(lastIPValues).isEmpty()) {
 				lastIPValues = ips;
 				cb(ips);
 			}

@@ -1,11 +1,11 @@
 import * as Bluebird from 'bluebird';
 import * as _ from 'lodash';
 
-import Docker from '../lib/docker-utils';
+import { docker } from '../lib/docker-utils';
 import { InvalidAppIdError } from '../lib/errors';
 import logTypes = require('../lib/log-types');
 import { checkInt } from '../lib/validation';
-import { Logger } from '../logger';
+import * as logger from '../logger';
 import * as ComposeUtils from './utils';
 
 import {
@@ -21,29 +21,15 @@ import {
 	InvalidNetworkNameError,
 } from './errors';
 
-export interface NetworkOptions {
-	docker: Docker;
-	logger: Logger;
-}
-
 export class Network {
 	public appId: number;
 	public name: string;
 	public config: NetworkConfig;
 
-	private docker: Docker;
-	private logger: Logger;
+	private constructor() {}
 
-	private constructor(opts: NetworkOptions) {
-		this.docker = opts.docker;
-		this.logger = opts.logger;
-	}
-
-	public static fromDockerNetwork(
-		opts: NetworkOptions,
-		network: NetworkInspect,
-	): Network {
-		const ret = new Network(opts);
+	public static fromDockerNetwork(network: NetworkInspect): Network {
+		const ret = new Network();
 
 		const match = network.Name.match(/^([0-9]+)_(.+)$/);
 		if (match == null) {
@@ -60,7 +46,7 @@ export class Network {
 			driver: network.Driver,
 			ipam: {
 				driver: network.IPAM.Driver,
-				config: _.map(network.IPAM.Config, conf => {
+				config: _.map(network.IPAM.Config, (conf) => {
 					const newConf: NetworkConfig['ipam']['config'][0] = {};
 
 					if (conf.Subnet != null) {
@@ -94,10 +80,11 @@ export class Network {
 	public static fromComposeObject(
 		name: string,
 		appId: number,
-		network: Partial<ComposeNetworkConfig>,
-		opts: NetworkOptions,
+		network: Partial<Omit<ComposeNetworkConfig, 'ipam'>> & {
+			ipam?: Partial<ComposeNetworkConfig['ipam']>;
+		},
 	): Network {
-		const net = new Network(opts);
+		const net = new Network();
 		net.name = name;
 		net.appId = appId;
 
@@ -139,11 +126,11 @@ export class Network {
 	}
 
 	public async create(): Promise<void> {
-		this.logger.logSystemEvent(logTypes.createNetwork, {
+		logger.logSystemEvent(logTypes.createNetwork, {
 			network: { name: this.name },
 		});
 
-		return await this.docker.createNetwork(this.toDockerConfig());
+		return await docker.createNetwork(this.toDockerConfig());
 	}
 
 	public toDockerConfig(): DockerNetworkConfig {
@@ -153,7 +140,7 @@ export class Network {
 			CheckDuplicate: true,
 			IPAM: {
 				Driver: this.config.ipam.driver,
-				Config: _.map(this.config.ipam.config, conf => {
+				Config: _.map(this.config.ipam.config, (conf) => {
 					const ipamConf: DockerIPAMConfig = {};
 					if (conf.subnet != null) {
 						ipamConf.Subnet = conf.subnet;
@@ -184,20 +171,27 @@ export class Network {
 	}
 
 	public remove(): Bluebird<void> {
-		this.logger.logSystemEvent(logTypes.removeNetwork, {
+		logger.logSystemEvent(logTypes.removeNetwork, {
 			network: { name: this.name, appId: this.appId },
 		});
 
-		return Bluebird.resolve(
-			this.docker
-				.getNetwork(Network.generateDockerName(this.appId, this.name))
-				.remove(),
-		).tapCatch(error => {
-			this.logger.logSystemEvent(logTypes.removeNetworkError, {
-				network: { name: this.name, appId: this.appId },
-				error,
+		const networkName = Network.generateDockerName(this.appId, this.name);
+
+		return Bluebird.resolve(docker.listNetworks())
+			.then((networks) => networks.filter((n) => n.Name === networkName))
+			.then(([network]) => {
+				if (!network) {
+					return Bluebird.resolve();
+				}
+				return Bluebird.resolve(
+					docker.getNetwork(networkName).remove(),
+				).tapCatch((error) => {
+					logger.logSystemEvent(logTypes.removeNetworkError, {
+						network: { name: this.name, appId: this.appId },
+						error,
+					});
+				});
 			});
-		});
 	}
 
 	public isEqualConfig(network: Network): boolean {
@@ -215,7 +209,9 @@ export class Network {
 	}
 
 	private static validateComposeConfig(
-		config: Partial<ComposeNetworkConfig>,
+		config: Partial<Omit<ComposeNetworkConfig, 'ipam'>> & {
+			ipam?: Partial<ComposeNetworkConfig['ipam']>;
+		},
 	): void {
 		// Check if every ipam config entry has both a subnet and a gateway
 		_.each(_.get(config, 'config.ipam.config', []), ({ subnet, gateway }) => {

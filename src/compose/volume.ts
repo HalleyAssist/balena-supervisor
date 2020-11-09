@@ -4,16 +4,12 @@ import isEqual = require('lodash/isEqual');
 import omitBy = require('lodash/omitBy');
 
 import constants = require('../lib/constants');
+import { docker } from '../lib/docker-utils';
 import { InternalInconsistencyError } from '../lib/errors';
 import * as LogTypes from '../lib/log-types';
 import { LabelObject } from '../lib/types';
-import Logger from '../logger';
+import * as logger from '../logger';
 import * as ComposeUtils from './utils';
-
-export interface VolumeConstructOpts {
-	logger: Logger;
-	docker: Docker;
-}
 
 export interface VolumeConfig {
 	labels: LabelObject;
@@ -28,23 +24,13 @@ export interface ComposeVolumeConfig {
 }
 
 export class Volume {
-	private logger: Logger;
-	private docker: Docker;
-
 	private constructor(
 		public name: string,
 		public appId: number,
 		public config: VolumeConfig,
-		opts: VolumeConstructOpts,
-	) {
-		this.logger = opts.logger;
-		this.docker = opts.docker;
-	}
+	) {}
 
-	public static fromDockerVolume(
-		opts: VolumeConstructOpts,
-		inspect: Docker.VolumeInspectInfo,
-	): Volume {
+	public static fromDockerVolume(inspect: Docker.VolumeInspectInfo): Volume {
 		// Convert the docker inspect to the config
 		const config: VolumeConfig = {
 			labels: inspect.Labels || {},
@@ -55,14 +41,13 @@ export class Volume {
 		// Detect the name and appId from the inspect data
 		const { name, appId } = this.deconstructDockerName(inspect.Name);
 
-		return new Volume(name, appId, config, opts);
+		return new Volume(name, appId, config);
 	}
 
 	public static fromComposeObject(
 		name: string,
 		appId: number,
 		config: Partial<ComposeVolumeConfig>,
-		opts: VolumeConstructOpts,
 	) {
 		const filledConfig: VolumeConfig = {
 			driverOpts: config.driver_opts || {},
@@ -74,7 +59,7 @@ export class Volume {
 		// get it from the daemon, they should already be there
 		assign(filledConfig.labels, constants.defaultVolumeLabels);
 
-		return new Volume(name, appId, filledConfig, opts);
+		return new Volume(name, appId, filledConfig);
 	}
 
 	public toComposeObject(): ComposeVolumeConfig {
@@ -97,10 +82,10 @@ export class Volume {
 	}
 
 	public async create(): Promise<void> {
-		this.logger.logSystemEvent(LogTypes.createVolume, {
+		logger.logSystemEvent(LogTypes.createVolume, {
 			volume: { name: this.name },
 		});
-		await this.docker.createVolume({
+		await docker.createVolume({
 			Name: Volume.generateDockerName(this.appId, this.name),
 			Labels: this.config.labels,
 			Driver: this.config.driver,
@@ -109,16 +94,16 @@ export class Volume {
 	}
 
 	public async remove(): Promise<void> {
-		this.logger.logSystemEvent(LogTypes.removeVolume, {
+		logger.logSystemEvent(LogTypes.removeVolume, {
 			volume: { name: this.name },
 		});
 
 		try {
-			await this.docker
+			await docker
 				.getVolume(Volume.generateDockerName(this.appId, this.name))
 				.remove();
 		} catch (e) {
-			this.logger.logSystemEvent(LogTypes.removeVolumeError, {
+			logger.logSystemEvent(LogTypes.removeVolumeError, {
 				volume: { name: this.name, appId: this.appId },
 				error: e,
 			});

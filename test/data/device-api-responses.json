@@ -1,0 +1,84 @@
+{
+  "V1": {
+    "GET": {
+      "/healthy": {
+        "statusCode": 200,
+        "body": {},
+        "text": "OK"
+      },
+      "/healthy [2]": {
+        "statusCode": 500,
+        "body": {},
+        "text": "Unhealthy"
+      },
+      "/apps/2": {
+        "statusCode": 200,
+        "body": {
+          "appId": 2,
+          "containerId": "abc123",
+          "commit": "7fc9c5bea8e361acd49886fe6cc1e1cd",
+          "env": {},
+          "releaseId": 77777
+        }
+      },
+      "/apps/2/stop": {
+        "statusCode": 200,
+        "body": {
+          "containerId": "abc123"
+        }
+      }
+    }
+  },
+  "V2": {
+    "GET": {
+      "/device/vpn": {
+        "statusCode": 200,
+        "body": {
+          "status": "success",
+          "vpn": {
+            "enabled": true,
+            "connected": false
+          }
+        }
+      },
+      "/applications/1/state": {
+        "statusCode": 200,
+        "body": {
+          "local": {
+            "1": {
+              "services": {
+                "1111": {
+                  "status": "Running",
+                  "releaseId": 99999,
+                  "download_progress": null
+                },
+                "2222": {
+                  "status": "Running",
+                  "releaseId": 99999,
+                  "download_progress": null
+                }
+              }
+            }
+          },
+          "dependent": {},
+          "commit": "7fc9c5bea8e361acd49886fe6cc1e1cd"
+        }
+      },
+      "/applications/9000/state": {
+        "statusCode": 409,
+        "body": {
+          "status": "failed",
+          "message": "Application ID does not exist: 9000"
+        }
+      },
+      "/applications/123invalid/state": {
+        "statusCode": 400,
+        "body": {
+          "status": "failed",
+          "message": "Invalid application ID: 123invalid"
+        }
+      }
+    },
+    "POST": {}
+  }
+}

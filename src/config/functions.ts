@@ -1,28 +1,32 @@
 import * as Bluebird from 'bluebird';
 import * as _ from 'lodash';
+import * as memoizee from 'memoizee';
+import { fs } from 'mz';
 import { URL } from 'url';
 
 import supervisorVersion = require('../lib/supervisor-version');
 
-import Config from '.';
+import * as config from '.';
 import * as constants from '../lib/constants';
 import * as osRelease from '../lib/os-release';
+import * as macAddress from '../lib/mac-address';
+import log from '../lib/supervisor-console';
 
 export const fnSchema = {
 	version: () => {
 		return Bluebird.resolve(supervisorVersion);
 	},
-	currentApiKey: (config: Config) => {
+	currentApiKey: () => {
 		return config
 			.getMany(['apiKey', 'deviceApiKey'])
 			.then(({ apiKey, deviceApiKey }) => {
 				return apiKey || deviceApiKey;
 			});
 	},
-	provisioned: (config: Config) => {
+	provisioned: () => {
 		return config
 			.getMany(['uuid', 'apiEndpoint', 'registered_at', 'deviceId'])
-			.then(requiredValues => {
+			.then((requiredValues) => {
 				return _.every(_.values(requiredValues));
 			});
 	},
@@ -32,14 +36,55 @@ export const fnSchema = {
 	osVariant: () => {
 		return osRelease.getOSVariant(constants.hostOSVersionPath);
 	},
-	provisioningOptions: (config: Config) => {
+	macAddress: () => {
+		return macAddress.getAll(constants.macAddressPath);
+	},
+	deviceArch: memoizee(
+		async () => {
+			try {
+				// FIXME: We should be mounting the following file into the supervisor from the
+				// start-resin-supervisor script, changed in meta-resin - but until then, hardcode it
+				const data = await fs.readFile(
+					`${constants.rootMountPoint}${constants.bootMountPoint}/device-type.json`,
+					'utf8',
+				);
+				const deviceInfo = JSON.parse(data);
+
+				return deviceInfo.arch;
+			} catch (e) {
+				log.error(`Unable to get architecture: ${e}`);
+				throw e;
+			}
+		},
+		{ promise: true },
+	),
+	deviceType: memoizee(
+		async () => {
+			try {
+				// FIXME: We should be mounting the following file into the supervisor from the
+				// start-resin-supervisor script, changed in meta-resin - but until then, hardcode it
+				const data = await fs.readFile(
+					`${constants.rootMountPoint}${constants.bootMountPoint}/device-type.json`,
+					'utf8',
+				);
+				const deviceInfo = JSON.parse(data);
+
+				return deviceInfo.slug;
+			} catch (e) {
+				log.error(`Unable to get device type: ${e}`);
+				throw e;
+			}
+		},
+		{ promise: true },
+	),
+	provisioningOptions: () => {
 		return config
 			.getMany([
 				'uuid',
-				'userId',
 				'applicationId',
 				'apiKey',
 				'deviceApiKey',
+				'deviceArch',
 				'deviceType',
 				'apiEndpoint',
 				'apiTimeout',
@@ -60,7 +105,7 @@ export const fnSchema = {
 				return {
 					uuid: conf.uuid,
 					applicationId: conf.applicationId,
-					userId: conf.userId,
+					deviceArch: conf.deviceArch,
 					deviceType: conf.deviceType,
 					provisioningApiKey: conf.apiKey,
 					deviceApiKey: conf.deviceApiKey,
@@ -71,8 +116,8 @@ export const fnSchema = {
 				};
 			});
 	},
-	mixpanelHost: (config: Config) => {
-		return config.get('apiEndpoint').then(apiEndpoint => {
+	mixpanelHost: () => {
+		return config.get('apiEndpoint').then((apiEndpoint) => {
 			if (!apiEndpoint) {
 				return null;
 			}
@@ -80,20 +125,20 @@ export const fnSchema = {
 			return { host: url.host, path: '/mixpanel' };
 		});
 	},
-	extendedEnvOptions: (config: Config) => {
+	extendedEnvOptions: () => {
 		return config.getMany([
 			'uuid',
 			'listenPort',
 			'name',
-			'apiSecret',
 			'apiEndpoint',
 			'deviceApiKey',
 			'version',
+			'deviceArch',
 			'deviceType',
 			'osVersion',
 		]);
 	},
-	fetchOptions: (config: Config) => {
+	fetchOptions: () => {
 		return config.getMany([
 			'uuid',
 			'currentApiKey',
@@ -107,8 +152,8 @@ export const fnSchema = {
 			'deltaVersion',
 		]);
 	},
-	unmanaged: (config: Config) => {
-		return config.get('apiEndpoint').then(apiEndpoint => {
+	unmanaged: () => {
+		return config.get('apiEndpoint').then((apiEndpoint) => {
 			return !apiEndpoint;
 		});
 	},

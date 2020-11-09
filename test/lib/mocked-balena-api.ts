@@ -1,12 +1,3 @@
-// TODO: This file was created by bulk-decaffeinate.
-// Sanity-check the conversion and remove this comment.
-/*
- * decaffeinate suggestions:
- * DS102: Remove unnecessary code created because of implicit returns
- * DS103: Rewrite code to no longer use __guard__
- * DS207: Consider shorter variations of null checks
- * Full docs: https://github.com/decaffeinate/decaffeinate/blob/master/docs/suggestions.md
- */
 import * as express from 'express';
 import * as _ from 'lodash';
 
@@ -29,18 +20,20 @@ api.balenaBackend = {
 	registerHandler: (req, res) => {
 		console.log('/device/register called with ', req.body);
 		const device = req.body;
-		device.id = api.balenaBackend!.currentId++;
-		api.balenaBackend!.devices[device.id] = device;
-		return res.status(201).json(device);
+		switch (req.body.uuid) {
+			case 'not-unique':
+				return res.status(409).json(device);
+			default:
+				device.id = api.balenaBackend!.currentId++;
+				api.balenaBackend!.devices[device.id] = device;
+				return res.status(201).json(device);
+		}
 	},
 	getDeviceHandler: (req, res) => {
-		const uuid =
-			req.query['$filter'] != null
-				? req.query['$filter'].match(/uuid eq '(.*)'/)[1]
-				: null;
+		const uuid = req.params[0];
 		if (uuid != null) {
 			return res.json({
-				d: _.filter(api.balenaBackend!.devices, dev => dev.uuid === uuid),
+				d: _.filter(api.balenaBackend!.devices, (dev) => dev.uuid === uuid),
 			});
 		} else {
 			return res.json({ d: [] });
@@ -55,9 +48,15 @@ api.post('/device/register', (req, res) =>
 	api.balenaBackend!.registerHandler(req, res, _.noop),
 );
 
-api.get('/v5/device', (req, res) =>
+api.get(/\/v6\/device\(uuid=%27([0-9a-f]+)%27\)/, (req, res) =>
 	api.balenaBackend!.getDeviceHandler(req, res, _.noop),
 );
+
+api.get(/\/v6\/device/, (req, res) => {
+	const [, uuid] = /uuid eq '([0-9a-f]+)'/i.exec(req.query['$filter']) ?? [];
+	req.params[0] = uuid;
+	return api.balenaBackend!.getDeviceHandler(req, res, _.noop);
+});
 
 api.post('/api-key/device/:deviceId/device-key', (req, res) =>
 	api.balenaBackend!.deviceKeyHandler(req, res, _.noop),

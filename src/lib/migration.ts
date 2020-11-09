@@ -3,26 +3,34 @@ import * as _ from 'lodash';
 import * as mkdirp from 'mkdirp';
 import { child_process, fs } from 'mz';
 import * as path from 'path';
-import { PinejsClientRequest } from 'pinejs-client-request';
 import * as rimraf from 'rimraf';
 
 const mkdirpAsync = Bluebird.promisify(mkdirp);
 const rimrafAsync = Bluebird.promisify(rimraf);
 
-import ApplicationManager from '../application-manager';
-import Config from '../config';
-import Database, { Transaction } from '../db';
-import DeviceState = require('../device-state');
+import * as apiBinder from '../api-binder';
+import * as config from '../config';
+import * as db from '../db';
+import * as volumeManager from '../compose/volume-manager';
+import * as serviceManager from '../compose/service-manager';
+import * as deviceState from '../device-state';
+import * as applicationManager from '../compose/application-manager';
 import * as constants from '../lib/constants';
-import { BackupError, DatabaseParseError, NotFoundError } from '../lib/errors';
+import {
+	BackupError,
+	DatabaseParseError,
+	NotFoundError,
+	InternalInconsistencyError,
+} from '../lib/errors';
+import { docker } from '../lib/docker-utils';
 import { pathExistsOnHost } from '../lib/fs-utils';
 import { log } from '../lib/supervisor-console';
-import {
-	ApplicationDatabaseFormat,
+import type {
 	AppsJsonFormat,
 	TargetApplication,
 	TargetState,
 } from '../types/state';
+import type { DatabaseApp } from '../device-state/target-state-cache';
 
 export const defaultLegacyVolume = () => 'resin-data';
 
@@ -105,16 +113,20 @@ export function convertLegacyAppsJson(appsArray: any[]): AppsJsonFormat {
 	return { apps, config: deviceConfig } as AppsJsonFormat;
 }
 
-export async function normaliseLegacyDatabase(
-	config: Config,
-	application: ApplicationManager,
-	db: Database,
-	balenaApi: PinejsClientRequest,
-) {
+export async function normaliseLegacyDatabase() {
+	await apiBinder.initialized;
+	await deviceState.initialized;
+
+	if (apiBinder.balenaApi == null) {
+		throw new InternalInconsistencyError(
+			'API binder is not initialized correctly',
+		);
+	}
+
 	// When legacy apps are present, we kill their containers and migrate their /data to a named volume
 	log.info('Migrating ids for legacy app...');
 
-	const apps: ApplicationDatabaseFormat = await db.models('app').select();
+	const apps: DatabaseApp[] = await db.models('app').select();
 
 	if (apps.length === 0) {
 		log.debug('No app to migrate');
@@ -146,7 +158,7 @@ export async function normaliseLegacyDatabase(
 		}
 
 		log.debug(`Getting release ${app.commit} for app ${app.appId} from API`);
-		const releases = (await balenaApi.get({
+		const releases = await apiBinder.balenaApi.get({
 			resource: 'release',
 			options: {
 				$filter: {
@@ -160,16 +172,13 @@ export async function normaliseLegacyDatabase(
 					},
 				},
 			},
-		})) as Array<Dictionary<any>>;
+		});
 
 		if (releases.length === 0) {
 			log.warn(
 				`No compatible releases found in API, removing ${app.appId} from target state`,
 			);
-			await db
-				.models('app')
-				.where({ appId: app.appId })
-				.del();
+			await db.models('app').where({ appId: app.appId }).del();
 		}
 
 		// We need to get the release.id, serviceId, image.id and updated imageUrl
@@ -184,10 +193,10 @@ export async function normaliseLegacyDatabase(
 			`Found a release with releaseId ${release.id}, imageId ${image.id}, serviceId ${serviceId}\nImage location is ${imageUrl}`,
 		);
 
-		const imageFromDocker = await application.docker
+		const imageFromDocker = await docker
 			.getImage(service.image)
 			.inspect()
-			.catch(error => {
+			.catch((error) => {
 				if (error instanceof NotFoundError) {
 					return;
 				}
@@ -199,13 +208,11 @@ export async function normaliseLegacyDatabase(
 			.where({ name: service.image })
 			.select();
 
-		await db.transaction(async (trx: Transaction) => {
+		await db.transaction(async (trx: db.Transaction) => {
 			try {
 				if (imagesFromDatabase.length > 0) {
 					log.debug('Deleting existing image entry in db');
-					await trx('image')
-						.where({ name: service.image })
-						.del();
+					await trx('image').where({ name: service.image }).del();
 				} else {
 					log.debug('No image in db to delete');
 				}
@@ -243,21 +250,20 @@ export async function normaliseLegacyDatabase(
 
 				log.debug('Updating app entry in db');
 				log.success('Successfully migrated legacy application');
-				await trx('app')
-					.update(app)
-					.where({ appId: app.appId });
+				await trx('app').update(app).where({ appId: app.appId });
 			}
 		});
 	}
 
 	log.debug('Killing legacy containers');
-	await application.services.killAllLegacy();
+	await serviceManager.killAllLegacy();
 	log.debug('Migrating legacy app volumes');
 
-	const targetApps = await application.getTargetApps();
+	await applicationManager.initialized;
+	const targetApps = await applicationManager.getTargetApps();
 
 	for (const appId of _.keys(targetApps)) {
-		await application.volumes.createFromLegacy(parseInt(appId, 10));
+		await volumeManager.createFromLegacy(parseInt(appId, 10));
 	}
 
 	await config.set({
@@ -266,7 +272,6 @@ export async function normaliseLegacyDatabase(
 }
 
 export async function loadBackupFromMigration(
-	deviceState: DeviceState,
 	targetState: TargetState,
 	retryDelay: number,
 ): Promise<void> {
@@ -310,19 +315,19 @@ export async function loadBackupFromMigration(
 			if (volumes[volumeName] != null) {
 				log.debug(`Creating volume ${volumeName} from backup`);
 				// If the volume exists (from a previous incomplete run of this restoreBackup), we delete it first
-				await deviceState.applications.volumes
+				await volumeManager
 					.get({ appId, name: volumeName })
-					.then(volume => {
+					.then((volume) => {
 						return volume.remove();
 					})
-					.catch(error => {
+					.catch((error) => {
 						if (error instanceof NotFoundError) {
 							return;
 						}
 						throw error;
 					});
 
-				await deviceState.applications.volumes.createFromPath(
+				await volumeManager.createFromPath(
 					{ appId, name: volumeName },
 					volumes[volumeName],
 					path.join(backupPath, volumeName),
@@ -346,6 +351,6 @@ export async function loadBackupFromMigration(
 		log.error(`Error restoring migration backup, retrying: ${err}`);
 
 		await Bluebird.delay(retryDelay);
-		return loadBackupFromMigration(deviceState, targetState, retryDelay);
+		return loadBackupFromMigration(targetState, retryDelay);
 	}
 }

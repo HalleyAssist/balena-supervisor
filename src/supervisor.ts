@@ -1,22 +1,25 @@
-import APIBinder from './api-binder';
-import Config, { ConfigKey } from './config';
-import Database from './db';
-import EventTracker from './event-tracker';
+import * as apiBinder from './api-binder';
+import * as db from './db';
+import * as config from './config';
+import * as deviceState from './device-state';
+import * as eventTracker from './event-tracker';
+import { intialiseContractRequirements } from './lib/contracts';
 import { normaliseLegacyDatabase } from './lib/migration';
-import Logger from './logger';
+import * as osRelease from './lib/os-release';
+import * as logger from './logger';
 import SupervisorAPI from './supervisor-api';
 
-import DeviceState = require('./device-state');
-
-import constants = require('./lib/constants');
 import log from './lib/supervisor-console';
 import version = require('./lib/supervisor-version');
 
-const startupConfigFields: ConfigKey[] = [
+import * as avahi from './lib/avahi';
+import * as firewall from './lib/firewall';
+import logMonitor from './logging/monitor';
+
+const startupConfigFields: config.ConfigKey[] = [
 	'uuid',
 	'listenPort',
 	'apiEndpoint',
-	'apiSecret',
 	'apiTimeout',
 	'unmanaged',
 	'deviceApiKey',
@@ -28,97 +31,53 @@ const startupConfigFields: ConfigKey[] = [
 ];
 
 export class Supervisor {
-	private db: Database;
-	private config: Config;
-	private eventTracker: EventTracker;
-	private logger: Logger;
-	private deviceState: DeviceState;
-	private apiBinder: APIBinder;
 	private api: SupervisorAPI;
-
-	public constructor() {
-		this.db = new Database();
-		this.config = new Config({ db: this.db });
-		this.eventTracker = new EventTracker();
-		this.logger = new Logger({ db: this.db, eventTracker: this.eventTracker });
-		this.deviceState = new DeviceState({
-			config: this.config,
-			db: this.db,
-			eventTracker: this.eventTracker,
-			logger: this.logger,
-		});
-		this.apiBinder = new APIBinder({
-			config: this.config,
-			db: this.db,
-			deviceState: this.deviceState,
-			eventTracker: this.eventTracker,
-			logger: this.logger,
-		});
-
-		// FIXME: rearchitect proxyvisor to avoid this circular dependency
-		// by storing current state and having the APIBinder query and report it / provision devices
-		this.deviceState.applications.proxyvisor.bindToAPI(this.apiBinder);
-		// We could also do without the below dependency, but it's part of a much larger refactor
-		this.deviceState.applications.apiBinder = this.apiBinder;
-
-		this.api = new SupervisorAPI({
-			config: this.config,
-			eventTracker: this.eventTracker,
-			routers: [this.apiBinder.router, this.deviceState.router],
-			healthchecks: [
-				this.apiBinder.healthcheck.bind(this.apiBinder),
-				this.deviceState.healthcheck.bind(this.deviceState),
-			],
-		});
-	}
 
 	public async init() {
 		log.info(`Supervisor v${version} starting up...`);
 
-		await this.db.init();
-		await this.config.init();
-
-		const conf = await this.config.getMany(startupConfigFields);
-
-		// We can't print to the dashboard until the logger
-		// has started up, so we leave a trail of breadcrumbs
-		// in the logs in case runtime fails to get to the
-		// first dashboard logs
-		log.debug('Starting event tracker');
-		await this.eventTracker.init(conf);
-
-		log.debug('Starting api binder');
-		await this.apiBinder.initClient();
-
+		await db.initialized;
+		await config.initialized;
+		await eventTracker.initialized;
+		await avahi.initialized;
 		log.debug('Starting logging infrastructure');
-		this.logger.init({
-			enableLogs: conf.loggingEnabled,
-			config: this.config,
-			...conf,
+		await logger.initialized;
+
+		const conf = await config.getMany(startupConfigFields);
+
+		intialiseContractRequirements({
+			supervisorVersion: version,
+			deviceType: await config.get('deviceType'),
+			l4tVersion: await osRelease.getL4tVersion(),
 		});
 
-		this.logger.logSystemMessage('Supervisor starting', {}, 'Supervisor start');
-		if (conf.legacyAppsPresent && this.apiBinder.balenaApi != null) {
+		log.info('Starting firewall');
+		await firewall.initialised;
+
+		log.debug('Starting api binder');
+		await apiBinder.initialized;
+
+		await deviceState.initialized;
+
+		logger.logSystemMessage('Supervisor starting', {}, 'Supervisor start');
+		if (conf.legacyAppsPresent && apiBinder.balenaApi != null) {
 			log.info('Legacy app detected, running migration');
-			await normaliseLegacyDatabase(
-				this.deviceState.config,
-				this.deviceState.applications,
-				this.db,
-				this.apiBinder.balenaApi,
-			);
+			await normaliseLegacyDatabase();
 		}
 
-		await this.deviceState.init();
+		await deviceState.loadInitialState();
 
 		log.info('Starting API server');
-		this.api.listen(
-			constants.allowedInterfaces,
-			conf.listenPort,
-			conf.apiTimeout,
-		);
-		this.deviceState.on('shutdown', () => this.api.stop());
+		this.api = new SupervisorAPI({
+			routers: [apiBinder.router, deviceState.router],
+			healthchecks: [apiBinder.healthcheck, deviceState.healthcheck],
+		});
+		this.api.listen(conf.listenPort, conf.apiTimeout);
+		deviceState.on('shutdown', () => this.api.stop());
 
-		await this.apiBinder.start();
+		await apiBinder.start();
+
+		logMonitor.start();
 	}
 }
 

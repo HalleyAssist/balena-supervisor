@@ -9,6 +9,8 @@ Locking updates means that the balena supervisor will not be able to kill your a
 
 In order to do this, users can create a lockfile in a way that it has exclusive access, which will prevent the device supervisor from killing and restarting the app. As with any other lockfile, the supervisor itself will create such a file before killing the app, so you should only create it in exclusive mode. This means that the lockfile should only be created if it doesn't already exist. The exclusive access is achieved by opening the lockfile with the [O_EXCL and O_CREAT flags](https://linux.die.net/man/3/open), and several tools exist to simplify this process with examples given [below](#creating-the-lockfile).
 
+For multicontainer applications, a release will only be updated if all of the services can be updated. While locks are per-service, having the update lock in a single service will prevent all services from updating to a new release.
+
 The presence of a lockfile will ensure that your application does not get killed, but updates will still be downloaded by the supervisor, ready to be applied once the lockfile no longer exists.
 
 ### Location of the lockfile
@@ -46,23 +48,25 @@ flock /tmp/balena/updates.lock -c '... (command to run while locked)'
 
 For more examples and explanation of the functionality, check the links to the specific tools above.
 
-#### Javascript and Coffeescript
+#### Javascript
 
-Using the [`lockfile` library](https://www.npmjs.com/package/lockfile), the lock can be acquired like in this CoffeeScript example:
-```coffeescript
-lockFile = require 'lockfile'
+Using the [`lockfile` library](https://www.npmjs.com/package/lockfile), the lock can be acquired like in this example:
+```javascript
+import lockFile from 'lockfile';
 
-lockFile.lock '/tmp/balena/updates.lock', (err) ->
-	# A non-null err probably means the supervisor is about to kill us
-	throw new Error('Could not acquire lock: ', err) if err?
+lockFile.lock('/tmp/balena/updates.lock', function(err) {
+	// A non-null err probably means the supervisor is about to kill us
+	if (err != null) { throw new Error('Could not acquire lock: ', err); }
 
-	# Here we have the lock, so we can do critical stuff:
-	doTheHarlemShake()
+	// Here we have the lock, so we can do critical stuff:
+	doTheHarlemShake();
 
-	# Now we release the lock, and we can be killed again
-	lockFile.unlock '/tmp/balena/updates.lock', (err) ->
-		# If err is not null here, something went really wrong
-		throw err if err?
+	// Now we release the lock, and we can be killed again
+	return lockFile.unlock('/tmp/balena/updates.lock', function(err) {
+		// If err is not null here, something went really wrong
+		if (err != null) { throw err; }
+	});
+});
 ```
 
 #### Python
@@ -80,6 +84,8 @@ Check the link for more examples and other Python libraries that provide locking
 
 The update lock can be overridden in case you need to force an update, for instance, if your app has hung in a critical section.
 
-The way to do this is hitting the `/v1/update` endpoint of the [supervisor HTTP API](./API.md), with `{ "force": true }` as body.
+To do this the device or fleet must have `BALENA_SUPERVISOR_OVERRIDE_LOCK` configuration variable set to "1".
 
-The lock can also be overridden by setting the app's `BALENA_SUPERVISOR_OVERRIDE_LOCK` configuration variable to "1".
+The easiest way to do this is to toggle the override in the actions section of your device. Go to the device you'd like to override a lock, then click the actions menu on the left hand side, and locate the 'Update lock override' toggle. Be sure to remove this toggle after if you'd like your update locks to work.
+
+Also, you can programatically do this by hitting the `/v1/update` endpoint of the [supervisor HTTP API](./API.md), with `{ "force": true }` as body.

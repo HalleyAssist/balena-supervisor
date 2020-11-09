@@ -2,21 +2,6 @@
 
 set -o errexit
 
-# Start Avahi to allow MDNS lookups and remove
-# any pre-defined services
-rm -f /etc/avahi/services/*
-mkdir -p /var/run/dbus
-rm -f /var/run/avahi-daemon/pid
-rm -f /var/run/dbus/pid
-if [ -x /etc/init.d/dbus-1 ]; then
-	/etc/init.d/dbus-1 start;
-elif [ -x /etc/init.d/dbus ]; then
-	/etc/init.d/dbus start;
-else
-	echo "Could not start container local dbus daemon. Avahi services may fail!";
-fi;
-/etc/init.d/avahi-daemon start
-
 # If the legacy /tmp/resin-supervisor exists on the host, a container might
 # already be using to take an update lock, so we symlink it to the new
 # location so that the supervisor can see it
@@ -48,6 +33,9 @@ export DBUS_SYSTEM_BUS_ADDRESS="unix:path=/mnt/root/run/dbus/system_bus_socket"
 # Include self-signed CAs, should they exist
 if [ -n "${BALENA_ROOT_CA}" ]; then
 	if [ ! -e '/etc/ssl/certs/balenaRootCA.pem' ]; then
+		echo "${BALENA_ROOT_CA}" > /etc/ssl/certs/balenaRootCA.pem
+
+		# Include the balenaRootCA in the system store for services like Docker
 		mkdir -p /usr/local/share/ca-certificates
 		echo "${BALENA_ROOT_CA}" > /usr/local/share/ca-certificates/balenaRootCA.crt
 		update-ca-certificates
@@ -68,4 +56,9 @@ fi
 # not a problem.
 modprobe ip6_tables || true
 
-exec node /usr/src/app/dist/app.js
+if [ "${LIVEPUSH}" = "1" ]; then
+	exec npx nodemon --watch src --watch typings --ignore tests -e js,ts,json \
+		 --exec node -r ts-node/register/transpile-only src/app.ts
+else
+	exec node /usr/src/app/dist/app.js
+fi

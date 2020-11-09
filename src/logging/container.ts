@@ -4,7 +4,7 @@ import * as _ from 'lodash';
 import * as Stream from 'stream';
 import StrictEventEmitter from 'strict-event-emitter-types';
 
-import Docker from '../lib/docker-utils';
+import { docker } from '../lib/docker-utils';
 
 export interface ContainerLog {
 	message: string;
@@ -21,7 +21,7 @@ interface LogsEvents {
 type LogsEventEmitter = StrictEventEmitter<EventEmitter, LogsEvents>;
 
 export class ContainerLogs extends (EventEmitter as new () => LogsEventEmitter) {
-	public constructor(public containerId: string, private docker: Docker) {
+	public constructor(public containerId: string) {
 		super();
 	}
 
@@ -34,7 +34,7 @@ export class ContainerLogs extends (EventEmitter as new () => LogsEventEmitter) 
 		const stdoutLogOpts = { stdout: true, stderr: false, ...logOpts };
 		const stderrLogOpts = { stderr: true, stdout: false, ...logOpts };
 
-		const container = this.docker.getContainer(this.containerId);
+		const container = docker.getContainer(this.containerId);
 		const stdoutStream = await container.logs(stdoutLogOpts);
 		const stderrStream = await container.logs(stderrLogOpts);
 
@@ -43,7 +43,7 @@ export class ContainerLogs extends (EventEmitter as new () => LogsEventEmitter) 
 			[stderrStream, false],
 		].forEach(([stream, isStdout]: [Stream.Readable, boolean]) => {
 			stream
-				.on('error', err => {
+				.on('error', (err) => {
 					this.emit(
 						'error',
 						new Error(`Error on container logs: ${err} ${err.stack}`),
@@ -59,7 +59,7 @@ export class ContainerLogs extends (EventEmitter as new () => LogsEventEmitter) 
 						this.emit('log', { isStdout, ...logMsg });
 					}
 				})
-				.on('error', err => {
+				.on('error', (err) => {
 					this.emit(
 						'error',
 						new Error(`Error on container logs: ${err} ${err.stack}`),
@@ -76,7 +76,7 @@ export class ContainerLogs extends (EventEmitter as new () => LogsEventEmitter) 
 		// https://docs.docker.com/engine/api/v1.30/#operation/ContainerAttach
 		if (
 			_.includes([0, 1, 2], msgBuf[0]) &&
-			_.every(msgBuf.slice(1, 7), c => c === 0)
+			_.every(msgBuf.slice(1, 7), (c) => c === 0)
 		) {
 			// Take the header from this message, and parse it as normal
 			msgBuf = msgBuf.slice(8);

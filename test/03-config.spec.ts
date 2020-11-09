@@ -1,46 +1,29 @@
-import * as Bluebird from 'bluebird';
 import * as _ from 'lodash';
 import { fs } from 'mz';
+import { SinonStub, stub } from 'sinon';
 
 import chai = require('./lib/chai-config');
 import prepare = require('./lib/prepare');
+import * as conf from '../src/config';
+
+import constants = require('../src/lib/constants');
+import { SchemaTypeKey } from '../src/config/schema-type';
+import { fnSchema } from '../src/config/functions';
 
 // tslint:disable-next-line
 chai.use(require('chai-events'));
 const { expect } = chai;
 
-import Config from '../src/config';
-import DB from '../src/db';
-import constants = require('../src/lib/constants');
-
 describe('Config', () => {
-	let db: DB;
-	let conf: Config;
-	let initialization: Bluebird<unknown>;
-
-	before(() => {
-		prepare();
-		db = new DB();
-		conf = new Config({ db });
-
-		initialization = db.init().then(() => conf.init());
+	before(async () => {
+		await prepare();
+		await conf.initialized;
 	});
 
 	it('uses the correct config.json path', async () => {
-		expect(await (conf as any).configJsonBackend.path()).to.equal(
+		expect(await conf.configJsonBackend.path()).to.equal(
 			'test/data/config.json',
 		);
-	});
-
-	it('uses the correct config.json path from the root mount when passed as argument to the constructor', async () => {
-		const conf2 = new Config({ db, configPath: '/foo.json' });
-		expect(await (conf2 as any).configJsonBackend.path()).to.equal(
-			'test/data/foo.json',
-		);
-	});
-
-	it('initializes correctly', () => {
-		return expect(initialization).to.be.fulfilled;
 	});
 
 	it('reads and exposes values from the config.json', async () => {
@@ -63,12 +46,12 @@ describe('Config', () => {
 			await fs.readFile('./test/data/config.json', 'utf8'),
 		).uuid;
 		expect(uuid).to.be.a('string');
-		expect(uuid).to.have.lengthOf(62);
+		expect(uuid).to.have.lengthOf(32);
 		expect(uuid).to.equal(configJsonUuid);
 	});
 
 	it('does not allow setting an immutable field', async () => {
-		const promise = conf.set({ username: 'somebody else' });
+		const promise = conf.set({ deviceType: 'a different device type' });
 		// We catch it to avoid the unhandled error log
 		promise.catch(_.noop);
 		return expect(promise).to.be.rejected;
@@ -81,12 +64,6 @@ describe('Config', () => {
 			appUpdatePollInterval: 30000,
 			name: 'a new device name',
 		});
-	});
-
-	it('allows removing a db key', async () => {
-		await conf.remove('apiSecret');
-		const secret = await conf.get('apiSecret');
-		return expect(secret).to.be.undefined;
 	});
 
 	it('allows deleting a config.json key and returns a default value if none is set', async () => {
@@ -116,13 +93,20 @@ describe('Config', () => {
 		expect(conf.get('unknownInvalidValue' as any)).to.be.rejected;
 	});
 
-	it('emits a change event when values are set', done => {
-		conf.on('change', val => {
-			expect(val).to.deep.equal({ name: 'someValue' });
-			return done();
-		});
+	it('emits a change event when values', (done) => {
+		const listener = (val: conf.ConfigChangeMap<SchemaTypeKey>) => {
+			try {
+				if ('name' in val) {
+					expect(val.name).to.equal('someValue');
+					done();
+					conf.removeListener('change', listener);
+				}
+			} catch (e) {
+				done(e);
+			}
+		};
+		conf.on('change', listener);
 		conf.set({ name: 'someValue' });
-		(expect(conf).to as any).emit('change');
 	});
 
 	it("returns an undefined OS variant if it doesn't exist", async () => {
@@ -134,21 +118,150 @@ describe('Config', () => {
 		expect(osVariant).to.be.undefined;
 	});
 
-	describe('Function config providers', () => {
-		before(async () => {
-			prepare();
-			db = new DB();
-			conf = new Config({ db });
-			await db.init();
-			await conf.init();
-		});
+	it('reads and exposes MAC addresses', async () => {
+		const macAddress = await conf.get('macAddress');
+		expect(macAddress).to.have.length.greaterThan(0);
+	});
 
+	describe('Function config providers', () => {
 		it('should throw if a non-mutable function provider is set', () => {
 			expect(conf.set({ version: 'some-version' })).to.be.rejected;
 		});
 
 		it('should throw if a non-mutable function provider is removed', () => {
 			expect(conf.remove('version' as any)).to.be.rejected;
+		});
+	});
+
+	describe('Config data sources', () => {
+		after(() => {
+			// Clean up memoized values
+		});
+
+		it('should obtain deviceArch from device-type.json', async () => {
+			const [slug, arch] = ['raspberrypi3', 'armv7hf'];
+			stub(fs, 'readFile').resolves(
+				JSON.stringify({
+					slug,
+					arch,
+				}),
+			);
+
+			const deviceArch = await conf.get('deviceArch');
+			expect(deviceArch).to.equal(arch);
+			expect(fs.readFile).to.be.calledOnce;
+			expect(fs.readFile).to.be.calledWith(
+				`${constants.rootMountPoint}${constants.bootMountPoint}/device-type.json`,
+				'utf8',
+			);
+
+			(fs.readFile as SinonStub).restore();
+		});
+
+		it('should obtain deviceType from device-type.json', async () => {
+			const [slug, arch] = ['raspberrypi3', 'armv7hf'];
+			stub(fs, 'readFile').resolves(
+				JSON.stringify({
+					slug,
+					arch,
+				}),
+			);
+
+			const deviceType = await conf.get('deviceType');
+			expect(deviceType).to.equal(slug);
+			expect(fs.readFile).to.be.calledOnce;
+			expect(fs.readFile).to.be.calledWith(
+				`${constants.rootMountPoint}${constants.bootMountPoint}/device-type.json`,
+				'utf8',
+			);
+
+			(fs.readFile as SinonStub).restore();
+		});
+
+		it('should memoize values from device-type.json', async () => {
+			const [slug, arch] = ['raspberrypi3', 'armv7hf'];
+			stub(fs, 'readFile').resolves(
+				JSON.stringify({
+					slug,
+					arch,
+				}),
+			);
+
+			const deviceArch = await conf.get('deviceArch');
+			expect(deviceArch).to.equal(arch);
+
+			// The result should still be memoized from the
+			// call on the previous test
+			expect(fs.readFile).to.not.be.called;
+
+			const deviceType = await conf.get('deviceType');
+			expect(deviceType).to.equal(slug);
+
+			// The result should still be memoized from the
+			// call on the previous test
+			expect(fs.readFile).to.not.be.called;
+
+			(fs.readFile as SinonStub).restore();
+		});
+
+		it('should not memoize errors when reading deviceArch', (done) => {
+			// Clean up memoized value
+			fnSchema.deviceArch.clear();
+
+			// File not found
+			stub(fs, 'readFile').throws('File not found');
+
+			expect(conf.get('deviceArch')).to.eventually.equal('unknown');
+			expect(fs.readFile).to.be.calledOnce;
+			(fs.readFile as SinonStub).restore();
+
+			// Next call should not throw
+			const [slug, arch] = ['raspberrypi3', 'armv7hf'];
+			stub(fs, 'readFile').resolves(
+				JSON.stringify({
+					slug,
+					arch,
+				}),
+			);
+
+			// We need to let rejection be discovered
+			// https://github.com/medikoo/memoizee/issues/93
+			setTimeout(() => {
+				expect(conf.get('deviceArch')).to.eventually.equal(arch);
+				expect(fs.readFile).to.be.calledOnce;
+				(fs.readFile as SinonStub).restore();
+				done();
+			});
+		});
+
+		it('should not memoize errors when reading deviceType', (done) => {
+			// Clean up memoized value
+			fnSchema.deviceType.clear();
+
+			// File not found
+			stub(fs, 'readFile').throws('File not found');
+
+			expect(conf.get('deviceType')).to.eventually.equal('unknown');
+			expect(fs.readFile).to.be.calledOnce;
+			(fs.readFile as SinonStub).restore();
+
+			// Next call should not throw
+			const [slug, arch] = ['raspberrypi3', 'armv7hf'];
+			stub(fs, 'readFile').resolves(
+				JSON.stringify({
+					slug,
+					arch,
+				}),
+			);
+
+			// We need to let rejection be discovered
+			// https://github.com/medikoo/memoizee/issues/93
+			setTimeout(() => {
+				expect(conf.get('deviceType')).to.eventually.equal(slug);
+				expect(fs.readFile).to.be.calledOnce;
+				(fs.readFile as SinonStub).restore();
+				done();
+			});
 		});
 	});
 });

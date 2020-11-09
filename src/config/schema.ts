@@ -34,21 +34,6 @@ export const schema = {
 		mutable: true,
 		removeIfNull: false,
 	},
-	deviceType: {
-		source: 'config.json',
-		mutable: false,
-		removeIfNull: false,
-	},
-	username: {
-		source: 'config.json',
-		mutable: false,
-		removeIfNull: false,
-	},
-	userId: {
-		source: 'config.json',
-		mutable: false,
-		removeIfNull: false,
-	},
 	deviceId: {
 		source: 'config.json',
 		mutable: true,
@@ -89,12 +74,12 @@ export const schema = {
 		mutable: true,
 		removeIfNull: false,
 	},
-
-	apiSecret: {
-		source: 'db',
-		mutable: true,
+	initialDeviceName: {
+		source: 'config.json',
+		mutable: false,
 		removeIfNull: false,
 	},
+
 	name: {
 		source: 'db',
 		mutable: true,
@@ -186,6 +171,16 @@ export const schema = {
 		removeIfNull: false,
 	},
 	instantUpdates: {
+		source: 'db',
+		mutable: true,
+		removeIfNull: false,
+	},
+	firewallMode: {
+		source: 'db',
+		mutable: true,
+		removeIfNull: false,
+	},
+	hostDiscoverability: {
 		source: 'db',
 		mutable: true,
 		removeIfNull: false,

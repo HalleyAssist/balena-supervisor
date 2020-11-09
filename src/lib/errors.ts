@@ -1,5 +1,6 @@
-import { endsWith, map, startsWith } from 'lodash';
-import TypedError = require('typed-error');
+import { endsWith, map } from 'lodash';
+import { Response } from 'request';
+import { TypedError } from 'typed-error';
 
 import { checkInt } from './validation';
 
@@ -12,6 +13,8 @@ export interface StatusCodeError extends Error {
 interface CodedSysError extends Error {
 	code?: string;
 }
+
+export class DeviceNotFoundError extends TypedError {}
 
 export function NotFoundError(err: StatusCodeError): boolean {
 	return checkInt(err.statusCode) === 404;
@@ -45,8 +48,14 @@ export class InvalidAppIdError extends TypedError {
 
 export class UpdatesLockedError extends TypedError {}
 
-export function DuplicateUuidError(err: Error) {
-	return startsWith(err.message, '"uuid" must be unique');
+export function isHttpConflictError(err: StatusCodeError | Response): boolean {
+	return checkInt(err.statusCode) === 409;
+}
+
+export class FailedToProvisionDeviceError extends TypedError {
+	public constructor() {
+		super('Failed to provision device');
+	}
 }
 
 export class ExchangeKeyError extends TypedError {}
@@ -105,3 +114,36 @@ export class ContractViolationError extends TypedError {
 export class AppsJsonParseError extends TypedError {}
 export class DatabaseParseError extends TypedError {}
 export class BackupError extends TypedError {}
+
+/**
+ * Thrown if we cannot parse an extlinux file.
+ */
+export class ExtLinuxParseError extends TypedError {}
+
+/**
+ * Thrown if there is a problem with the environment of which extlinux config is in.
+ * This can be things like missing config files or config files we cannot write to.
+ */
+export class ExtLinuxEnvError extends TypedError {}
+
+/**
+ * Thrown if we cannot parse the APPEND directive from a extlinux file
+ */
+export class AppendDirectiveError extends TypedError {}
+
+/**
+ * Thrown if we cannot parse the FDT directive from a extlinux file
+ */
+export class FDTDirectiveError extends TypedError {}
+
+/**
+ * Generic error thrown when something goes wrong with handling the ExtraUEnv backend.
+ * This can be things like missing config files or config files we cannot write to.
+ */
+export class ExtraUEnvError extends TypedError {}
+
+/**
+ * Generic error thrown when something goes wrong with handling the ODMDATA backend.
+ * This can be things like missing config files or config files we cannot write to.
+ */
+export class ODMDataError extends TypedError {}

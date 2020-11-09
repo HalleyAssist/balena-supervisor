@@ -5,7 +5,7 @@ import { fs } from 'mz';
 import ChaiConfig = require('./lib/chai-config');
 import prepare = require('./lib/prepare');
 
-import { DB } from '../src/db';
+import * as constants from '../src/lib/constants';
 
 const { expect } = ChaiConfig;
 
@@ -22,57 +22,59 @@ async function createOldDatabase(path: string) {
 		name: string,
 		fn: (trx: Knex.CreateTableBuilder) => void,
 	) =>
-		knex.schema.createTable(name, t => {
+		knex.schema.createTable(name, (t) => {
 			if (fn != null) {
 				return fn(t);
 			}
 		});
 
-	await createEmptyTable('app', t => {
+	await createEmptyTable('app', (t) => {
 		t.increments('id').primary();
 		t.boolean('privileged');
 		return t.string('containerId');
 	});
-	await createEmptyTable('config', t => {
+	await createEmptyTable('config', (t) => {
 		t.string('key');
 		return t.string('value');
 	});
-	await createEmptyTable('dependentApp', t => t.increments('id').primary());
-	await createEmptyTable('dependentDevice', t => t.increments('id').primary());
+	await createEmptyTable('dependentApp', (t) => t.increments('id').primary());
+	await createEmptyTable('dependentDevice', (t) =>
+		t.increments('id').primary(),
+	);
 	return knex;
 }
 
-describe('DB', () => {
-	let db: DB;
-
-	before(() => {
-		prepare();
-		db = new DB();
+describe('Database Migrations', () => {
+	before(async () => {
+		await prepare();
 	});
 
-	it('initializes correctly, running the migrations', () => {
-		return expect(db.init()).to.be.fulfilled;
+	after(() => {
+		// @ts-ignore
+		constants.databasePath = process.env.DATABASE_PATH;
+		delete require.cache[require.resolve('../src/db')];
 	});
 
-	it('creates a database at the path from an env var', () => {
-		const promise = fs.stat(process.env.DATABASE_PATH!);
-		return expect(promise).to.be.fulfilled;
-	});
+	it('creates a database at the path passed on creation', async () => {
+		const databasePath = process.env.DATABASE_PATH_2!;
+		// @ts-ignore
+		constants.databasePath = databasePath;
+		delete require.cache[require.resolve('../src/db')];
 
-	it('creates a database at the path passed on creation', () => {
-		const db2 = new DB({ databasePath: process.env.DATABASE_PATH_2 });
-		const promise = db2
-			.init()
-			.then(() => fs.stat(process.env.DATABASE_PATH_2!));
-		return expect(promise).to.be.fulfilled;
+		const testDb = await import('../src/db');
+		await testDb.initialized;
+		await fs.stat(databasePath);
 	});
 
 	it('adds new fields and removes old ones in an old database', async () => {
 		const databasePath = process.env.DATABASE_PATH_3!;
 
 		const knexForDB = await createOldDatabase(databasePath);
-		const testDb = new DB({ databasePath });
-		await testDb.init();
+		// @ts-ignore
+		constants.databasePath = databasePath;
+		delete require.cache[require.resolve('../src/db')];
+		const testDb = await import('../src/db');
+		await testDb.initialized;
 		await Bluebird.all([
 			expect(knexForDB.schema.hasColumn('app', 'appId')).to.eventually.be.true,
 			expect(knexForDB.schema.hasColumn('app', 'releaseId')).to.eventually.be
@@ -95,7 +97,22 @@ describe('DB', () => {
 				.to.eventually.be.true,
 		]);
 	});
+});
 
+describe('Database', () => {
+	let db: typeof import('../src/db');
+
+	before(async () => {
+		await prepare();
+		db = await import('../src/db');
+	});
+	it('initializes correctly, running the migrations', () => {
+		return expect(db.initialized).to.be.fulfilled;
+	});
+	it('creates a database at the path from an env var', () => {
+		const promise = fs.stat(process.env.DATABASE_PATH!);
+		return expect(promise).to.be.fulfilled;
+	});
 	it('creates a deviceConfig table with a single default value', async () => {
 		const deviceConfig = await db.models('deviceConfig').select();
 		expect(deviceConfig).to.have.lengthOf(1);
@@ -103,6 +120,6 @@ describe('DB', () => {
 	});
 
 	it('allows performing transactions', () => {
-		return db.transaction(trx => expect(trx.commit()).to.be.fulfilled);
+		return db.transaction((trx) => expect(trx.commit()).to.be.fulfilled);
 	});
 });

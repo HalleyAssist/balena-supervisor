@@ -1,33 +1,32 @@
 import * as _ from 'lodash';
+import * as Bluebird from 'bluebird';
 
+import * as config from '../config';
+import * as constants from '../lib/constants';
+import { getMetaOSRelease } from '../lib/os-release';
 import { EnvVarObject } from '../lib/types';
-import {
-	ConfigOptions,
-	DeviceConfigBackend,
-	ExtlinuxConfigBackend,
-	RPiConfigBackend,
-} from './backend';
+import { allBackends as Backends } from './backends';
+import { ConfigOptions, ConfigBackend } from './backends/backend';
 
-const configBackends = [new ExtlinuxConfigBackend(), new RPiConfigBackend()];
-
-export function isConfigDeviceType(deviceType: string): boolean {
-	return getConfigBackend(deviceType) != null;
-}
-
-export function getConfigBackend(
-	deviceType: string,
-): DeviceConfigBackend | undefined {
-	return _.find(configBackends, backend => backend.matches(deviceType));
+export async function getSupportedBackends(): Promise<ConfigBackend[]> {
+	// Get required information to find supported backends
+	const [deviceType, metaRelease] = await Promise.all([
+		config.get('deviceType'),
+		getMetaOSRelease(constants.hostOSVersionPath),
+	]);
+	// Return list of configurable backends that match this deviceType and metaRelease
+	return Bluebird.filter(Backends, (backend: ConfigBackend) =>
+		backend.matches(deviceType, metaRelease),
+	);
 }
 
 export function envToBootConfig(
-	configBackend: DeviceConfigBackend | null,
+	configBackend: ConfigBackend | null,
 	env: EnvVarObject,
 ): ConfigOptions {
 	if (configBackend == null) {
 		return {};
 	}
-
 	return _(env)
 		.pickBy((_val, key) => configBackend.isBootConfigVar(key))
 		.mapKeys((_val, key) => configBackend.processConfigVarName(key))
@@ -38,12 +37,12 @@ export function envToBootConfig(
 }
 
 export function bootConfigToEnv(
-	configBackend: DeviceConfigBackend,
-	config: ConfigOptions,
+	configBackend: ConfigBackend,
+	configOptions: ConfigOptions,
 ): EnvVarObject {
-	return _(config)
+	return _(configOptions)
 		.mapKeys((_val, key) => configBackend.createConfigVarName(key))
-		.mapValues(val => {
+		.mapValues((val) => {
 			if (_.isArray(val)) {
 				return JSON.stringify(val).replace(/^\[(.*)\]$/, '$1');
 			}
@@ -52,7 +51,7 @@ export function bootConfigToEnv(
 		.value();
 }
 
-function filterNamespaceFromConfig(
+export function filterNamespaceFromConfig(
 	namespace: RegExp,
 	conf: { [key: string]: any },
 ): { [key: string]: any } {
@@ -64,34 +63,4 @@ function filterNamespaceFromConfig(
 			return k.replace(namespace, '$1');
 		},
 	);
-}
-
-export function formatConfigKeys(
-	configBackend: DeviceConfigBackend | null,
-	allowedKeys: string[],
-	conf: { [key: string]: any },
-): { [key: string]: any } {
-	const isConfigType = configBackend != null;
-	const namespaceRegex = /^BALENA_(.*)/;
-	const legacyNamespaceRegex = /^RESIN_(.*)/;
-	const confFromNamespace = filterNamespaceFromConfig(namespaceRegex, conf);
-	const confFromLegacyNamespace = filterNamespaceFromConfig(
-		legacyNamespaceRegex,
-		conf,
-	);
-	const noNamespaceConf = _.pickBy(conf, (_v, k) => {
-		return !_.startsWith(k, 'RESIN_') && !_.startsWith(k, 'BALENA_');
-	});
-	const confWithoutNamespace = _.defaults(
-		confFromNamespace,
-		confFromLegacyNamespace,
-		noNamespaceConf,
-	);
-
-	return _.pickBy(confWithoutNamespace, (_v, k) => {
-		return (
-			_.includes(allowedKeys, k) ||
-			(isConfigType && configBackend!.isBootConfigVar(k))
-		);
-	});
 }

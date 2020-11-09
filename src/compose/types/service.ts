@@ -54,7 +54,7 @@ export interface ServiceComposeConfig {
 	image: string;
 	init?: string | boolean;
 	labels?: { [labelName: string]: string };
-	running: boolean;
+	running?: boolean;
 	networkMode?: string;
 	networks?: string[] | ServiceNetworkDictionary;
 	pid?: string;
@@ -100,6 +100,7 @@ export interface ServiceConfig {
 	command: string[];
 	cgroupParent: string;
 	devices: DockerDevice[];
+	deviceRequests: Dockerode.DeviceRequest[];
 	dns: string | string[];
 	dnsOpt: string[];
 	dnsSearch: string | string[];
@@ -183,10 +184,11 @@ export interface ConfigMap {
 // is typescript
 export interface DeviceMetadata {
 	imageInfo?: Dockerode.ImageInspectInfo;
-	uuid: string;
+	uuid: string | null;
 	appName: string;
 	version: string;
 	deviceType: string;
+	deviceArch: string;
 	deviceApiKey: string;
 	apiEndpoint: string;
 	listenPort: number;
