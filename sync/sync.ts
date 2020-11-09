@@ -20,7 +20,7 @@ const argv = yargs
 	.command(
 		'$0 <device-address>',
 		'Sync changes in code to a running debug mode supervisor on a local device',
-		y =>
+		(y) =>
 			y.positional('device-address', {
 				type: 'string',
 				describe: 'The address of a local device',

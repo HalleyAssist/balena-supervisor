@@ -91,7 +91,7 @@ export const fnSchema = {
 				'registered_at',
 				'deviceId',
 			])
-			.then(conf => {
+			.then((conf) => {
 				if (process.env.NODE_ENV !== 'test') {
 					if (
 						conf.applicationId &&

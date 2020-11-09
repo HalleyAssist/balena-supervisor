@@ -46,11 +46,11 @@ if ! [ -x "$(command -v npx)" ]; then
 fi
 
 # This is the supervisor image we will produce
-TARGET_IMAGE=balena/$ARCH-supervisor:$TAG
-TARGET_BUILD_IMAGE=balena/$ARCH-supervisor:$TAG-build
+TARGET_IMAGE=halleyassistau/$ARCH-supervisor:$TAG$DEBUG
+TARGET_BUILD_IMAGE=halleyassistau/$ARCH-supervisor:$TAG-build
 
-MASTER_IMAGE=balena/$ARCH-supervisor:master
-MASTER_BUILD_IMAGE=balena/$ARCH-supervisor:master-build
+MASTER_IMAGE=halleyassistau/$ARCH-supervisor:master
+MASTER_BUILD_IMAGE=halleyassistau/$ARCH-supervisor:master-build
 
 CACHE_FROM=""
 function useCache() {

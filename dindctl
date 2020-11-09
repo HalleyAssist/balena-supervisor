@@ -46,7 +46,7 @@ SUPERVISOR_BASE_DIR="${DIR}"
 DIND_DIR="${SUPERVISOR_BASE_DIR}/tools/dind/"
 
 ARCH="amd64"
-SUPERVISOR_IMAGE="balena/${ARCH}-supervisor:master"
+SUPERVISOR_IMAGE="halleyassistau/${ARCH}-supervisor:master"
 DIND_IMAGE="resin/resinos:2.48.0_rev3-intel-nuc"
 MOUNT_DIST="false"
 MOUNT_NODE_MODULES="false"

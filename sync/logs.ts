@@ -16,7 +16,7 @@ export async function setupLogs(
 		since: lastReadTimestamp,
 	});
 
-	stream.on('data', chunk => {
+	stream.on('data', (chunk) => {
 		const { message, timestamp } = extractMessage(chunk);
 		// Add one here, other we can end up constantly reading
 		// the same log line
